@@ -97,6 +97,9 @@ class StringDataPrinter(object):
         return self.val['_data'].lazy_string(length=size)
 
 
+YEAR_OUT_OF_RANGE = re.compile("year [0-9]+ is out of range")
+
+
 class BSONObjPrinter(object):
     """Pretty-printer for mongo::BSONObj."""
 
@@ -127,11 +130,27 @@ class BSONObjPrinter(object):
         inferior = gdb.selected_inferior()
         buf = bson.BSON(bytes(inferior.read_memory(self.ptr, self.size)))
         options = CodecOptions(document_class=collections.OrderedDict)
-        bsondoc = buf.decode(codec_options=options)
+        try:
+            bsondoc = buf.decode(codec_options=options)
+            yield_value = bson.json_util.dumps(val)
+        except bson.errors.InvalidBSON as e:
+            # pymongo and the built in bson library use Python native datetime
+            # to represent BSON datetime objects. Unfortunately, native
+            # datetime does not support dates where the year is greater
+            # than 9999, but the BSON spec permits this.
+            # Detect this scenario, and semi-gracefully handle this situation
+            # by telling the user it's out of range
+            matches = YEAR_OUT_OF_RANGE.search(str(e))
+            if len(matches) == 0:
+                # If this is raised, file a SERVER ticket assigned to the STM
+                # backlog
+                raise e
+
+            yield_value = "out of range BSON datetime"
 
         for key, val in list(bsondoc.items()):
             yield 'key', key
-            yield 'value', bson.json_util.dumps(val)
+            yield 'value', yield_value
 
     def to_string(self):
         """Return BSONObj for printing."""
