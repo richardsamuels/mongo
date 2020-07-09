@@ -45,7 +45,6 @@
 #include "mongo/rpc/op_msg.h"
 #include "mongo/transport/message_compressor_manager.h"
 #include "mongo/transport/service_entry_point.h"
-#include "mongo/transport/service_executor_task_names.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util.h"
@@ -55,6 +54,7 @@
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/socket_exception.h"
+#include "mongo/util/net/ssl_peer_info.h"
 #include "mongo/util/quick_exit.h"
 
 namespace mongo {
@@ -375,9 +375,7 @@ void ServiceStateMachine::_sourceCallback(Status status) {
         // If this callback doesn't own the ThreadGuard, then we're being called recursively,
         // and the executor shouldn't start a new thread to process the message - it can use this
         // one just after this returns.
-        return _scheduleNextWithGuard(std::move(guard),
-                                      ServiceExecutor::kMayRecurse,
-                                      transport::ServiceExecutorTaskName::kSSMProcessMessage);
+        return _scheduleNextWithGuard(std::move(guard), ServiceExecutor::kMayRecurse);
     } else if (ErrorCodes::isInterruption(status.code()) ||
                ErrorCodes::isNetworkError(status.code())) {
         LOGV2_DEBUG(
@@ -397,12 +395,10 @@ void ServiceStateMachine::_sourceCallback(Status status) {
         _state.store(State::EndSession);
     } else {
         LOGV2(22988,
-              "Error receiving request from client: {error}. Ending connection from {remote} "
-              "(connection id: {connnection_id})",
               "Error receiving request from client. Ending connection from remote",
               "error"_attr = status,
               "remote"_attr = remote,
-              "connection_id"_attr = _session()->id());
+              "connectionId"_attr = _session()->id());
         _state.store(State::EndSession);
     }
 
@@ -425,26 +421,22 @@ void ServiceStateMachine::_sinkCallback(Status status) {
     // scheduleNext() to unwind the stack and do the next step.
     if (!status.isOK()) {
         LOGV2(22989,
-              "Error sending response to client: {error}. Ending connection from {remote} "
-              "(connection id: {connection_id})",
               "Error sending response to client. Ending connection from remote",
               "error"_attr = status,
               "remote"_attr = _session()->remote(),
-              "connection_id"_attr = _session()->id());
+              "connectionId"_attr = _session()->id());
         _state.store(State::EndSession);
         return _runNextInGuard(std::move(guard));
     } else if (_inExhaust) {
         _state.store(State::Process);
         return _scheduleNextWithGuard(std::move(guard),
                                       ServiceExecutor::kDeferredTask |
-                                          ServiceExecutor::kMayYieldBeforeSchedule,
-                                      transport::ServiceExecutorTaskName::kSSMExhaustMessage);
+                                          ServiceExecutor::kMayYieldBeforeSchedule);
     } else {
         _state.store(State::Source);
         return _scheduleNextWithGuard(std::move(guard),
                                       ServiceExecutor::kDeferredTask |
-                                          ServiceExecutor::kMayYieldBeforeSchedule,
-                                      transport::ServiceExecutorTaskName::kSSMSourceMessage);
+                                          ServiceExecutor::kMayYieldBeforeSchedule);
     }
 }
 
@@ -528,9 +520,7 @@ void ServiceStateMachine::_processMessage(ThreadGuard guard) {
         _state.store(State::Source);
         _inMessage.reset();
         _inExhaust = false;
-        return _scheduleNextWithGuard(std::move(guard),
-                                      ServiceExecutor::kDeferredTask,
-                                      transport::ServiceExecutorTaskName::kSSMSourceMessage);
+        return _scheduleNextWithGuard(std::move(guard), ServiceExecutor::kDeferredTask);
     }
 }
 
@@ -589,10 +579,8 @@ void ServiceStateMachine::_runNextInGuard(ThreadGuard guard) {
 }
 
 void ServiceStateMachine::start(Ownership ownershipModel) {
-    _scheduleNextWithGuard(ThreadGuard(this),
-                           transport::ServiceExecutor::kEmptyFlags,
-                           transport::ServiceExecutorTaskName::kSSMStartSession,
-                           ownershipModel);
+    _scheduleNextWithGuard(
+        ThreadGuard(this), transport::ServiceExecutor::kEmptyFlags, ownershipModel);
 }
 
 void ServiceStateMachine::setServiceExecutor(ServiceExecutor* executor) {
@@ -601,7 +589,6 @@ void ServiceStateMachine::setServiceExecutor(ServiceExecutor* executor) {
 
 void ServiceStateMachine::_scheduleNextWithGuard(ThreadGuard guard,
                                                  transport::ServiceExecutor::ScheduleFlags flags,
-                                                 transport::ServiceExecutorTaskName taskName,
                                                  Ownership ownershipModel) {
     auto func = [ssm = shared_from_this(), ownershipModel] {
         ThreadGuard guard(ssm.get());
@@ -610,7 +597,7 @@ void ServiceStateMachine::_scheduleNextWithGuard(ThreadGuard guard,
         ssm->_runNextInGuard(std::move(guard));
     };
     guard.release();
-    Status status = _serviceExecutor->schedule(std::move(func), flags, taskName);
+    Status status = _serviceExecutor->schedule(std::move(func), flags);
     if (status.isOK()) {
         return;
     }
@@ -641,9 +628,8 @@ void ServiceStateMachine::terminateIfTagsDontMatch(transport::Session::TagMask t
     // set, then skip the termination check.
     if ((sessionTags & tags) || (sessionTags & transport::Session::kPending)) {
         LOGV2(22991,
-              "Skip closing connection for connection # {connection_id}",
               "Skip closing connection for connection",
-              "connection_id"_attr = _session()->id());
+              "connectionId"_attr = _session()->id());
         return;
     }
 

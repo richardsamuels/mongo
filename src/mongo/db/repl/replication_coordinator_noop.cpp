@@ -41,7 +41,7 @@ void ReplicationCoordinatorNoOp::startup(OperationContext* opCtx) {}
 
 void ReplicationCoordinatorNoOp::enterTerminalShutdown() {}
 
-bool ReplicationCoordinatorNoOp::enterQuiesceModeIfSecondary() {
+bool ReplicationCoordinatorNoOp::enterQuiesceModeIfSecondary(Milliseconds quiesceTime) {
     MONGO_UNREACHABLE;
 }
 
@@ -236,6 +236,12 @@ OpTime ReplicationCoordinatorNoOp::getMyLastDurableOpTime() const {
     MONGO_UNREACHABLE;
 }
 
+Status ReplicationCoordinatorNoOp::waitUntilMajorityOpTime(OperationContext* opCtx,
+                                                           OpTime targetOpTime,
+                                                           boost::optional<Date_t> deadline) {
+    MONGO_UNREACHABLE;
+}
+
 Status ReplicationCoordinatorNoOp::waitUntilOpTimeForRead(OperationContext*,
                                                           const ReadConcernArgs& readConcern) {
     MONGO_UNREACHABLE;
@@ -390,10 +396,12 @@ void ReplicationCoordinatorNoOp::resetLastOpTimesFromOplog(OperationContext*, Da
     MONGO_UNREACHABLE;
 }
 
-bool ReplicationCoordinatorNoOp::shouldChangeSyncSource(const HostAndPort&,
-                                                        const rpc::ReplSetMetadata&,
-                                                        const rpc::OplogQueryMetadata&,
-                                                        const OpTime&) {
+ChangeSyncSourceAction ReplicationCoordinatorNoOp::shouldChangeSyncSource(
+    const HostAndPort&,
+    const rpc::ReplSetMetadata&,
+    const rpc::OplogQueryMetadata&,
+    const OpTime&,
+    const OpTime&) {
     MONGO_UNREACHABLE;
 }
 

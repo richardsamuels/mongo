@@ -50,10 +50,11 @@ public:
     enum class Component : uint8_t {
         ClusterTime = 0,
         ConfigTime = 1,
-        _kNumComponents = 2,
+        TopologyTime = 2,
+        _kNumComponents = 3,
     };
 
-private:
+protected:
     template <typename T>
     class ComponentArray
         : public std::array<T, static_cast<unsigned long>(Component::_kNumComponents)> {
@@ -75,7 +76,6 @@ private:
         T& operator[](unsigned long i);
     };
 
-protected:
     using LogicalTimeArray = ComponentArray<LogicalTime>;
 
 public:
@@ -95,6 +95,7 @@ public:
 
     static constexpr char kClusterTimeFieldName[] = "$clusterTime";
     static constexpr char kConfigTimeFieldName[] = "$configTime";
+    static constexpr char kTopologyTimeFieldName[] = "$topologyTime";
 
     // Decorate ServiceContext with VectorClock* which points to the actual vector clock
     // implementation.
@@ -132,9 +133,31 @@ public:
     bool isEnabled() const;
 
     void resetVectorClock_forTest();
-    void advanceClusterTime_forTest(LogicalTime newClusterTime);
+    void advanceTime_forTest(Component component, LogicalTime newTime);
 
 protected:
+    class ComponentFormat {
+
+    public:
+        ComponentFormat(std::string fieldName) : _fieldName(fieldName) {}
+        virtual ~ComponentFormat() = default;
+
+        // Returns true if the time was output, false otherwise.
+        virtual bool out(ServiceContext* service,
+                         OperationContext* opCtx,
+                         bool permitRefresh,
+                         BSONObjBuilder* out,
+                         LogicalTime time,
+                         Component component) const = 0;
+        virtual LogicalTime in(ServiceContext* service,
+                               OperationContext* opCtx,
+                               const BSONObj& in,
+                               bool couldBeUnauthenticated,
+                               Component component) const = 0;
+
+        const std::string _fieldName;
+    };
+
     VectorClock();
     virtual ~VectorClock();
 
@@ -256,7 +279,12 @@ protected:
     bool _isEnabled{true};
 
 private:
-    class GossipFormat;
+    class PlainComponentFormat;
+    class SignedComponentFormat;
+    template <class ActualFormat>
+    class OnlyOutOnNewFCVComponentFormat;
+
+    static const ComponentArray<std::unique_ptr<ComponentFormat>> _gossipFormatters;
 };
 
 }  // namespace mongo

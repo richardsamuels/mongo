@@ -61,6 +61,7 @@
 #include "mongo/util/net/ssl.hpp"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/net/ssl_parameters_gen.h"
+#include "mongo/util/net/ssl_peer_info.h"
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/str.h"
 #include "mongo/util/text.h"
@@ -295,6 +296,8 @@ public:
     int SSL_write(SSLConnectionInterface* conn, const void* buf, int num) final;
 
     int SSL_shutdown(SSLConnectionInterface* conn) final;
+
+    SSLInformationToLog getSSLInformationToLog() const final;
 
 private:
     Status _loadCertificates(const SSLParams& params);
@@ -1396,7 +1399,7 @@ Status SSLManagerWindows::initSSLContext(SCHANNEL_CRED* cred,
                 "All supported TLS protocols have been disabled."};
     }
 
-    if (!params.sslCipherConfig.empty()) {
+    if (params.sslCipherConfig != kSSLCipherConfigDefault) {
         LOGV2_WARNING(
             23272,
             "sslCipherConfig parameter is not supported with Windows SChannel and is ignored.");
@@ -2043,6 +2046,11 @@ Future<SSLPeerInfo> SSLManagerWindows::parseAndValidatePeerCertificate(
     } else {
         return Future<SSLPeerInfo>::makeReady(SSLPeerInfo(peerSubjectName));
     }
+}
+
+SSLInformationToLog SSLManagerWindows::getSSLInformationToLog() const {
+    SSLInformationToLog info;
+    return info;
 }
 
 }  // namespace

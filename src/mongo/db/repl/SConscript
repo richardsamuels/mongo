@@ -704,10 +704,10 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/collection_catalog',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
-        '$BUILD_DIR/mongo/db/replica_set_aware_service',
         '$BUILD_DIR/mongo/idl/server_parameter',
         'local_oplog_info',
         'repl_server_parameters',
+        'replica_set_aware_service',
         'split_horizon',
     ],
 )
@@ -750,6 +750,16 @@ env.Library(
         '$BUILD_DIR/mongo/db/namespace_string',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/util/net/network',
+    ],
+)
+
+env.Library(
+    target='replica_set_aware_service',
+    source=[
+        'replica_set_aware_service.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/service_context',
     ],
 )
 
@@ -1154,11 +1164,28 @@ env.Library(
 )
 
 env.Library(
+    target='migrating_tenant_access_blocker',
+    source=[
+        'migrating_tenant_access_blocker.cpp',
+        'migrating_tenant_access_blocker_by_prefix.cpp',
+        'migrating_tenant_access_blocker_server_status_section.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/service_context',
+        'optime',
+        'repl_coordinator_impl'
+    ],
+)
+
+env.Library(
     target="serveronly_repl",
     source=[
+        'migrating_tenant_donor_util.cpp',
         'noop_writer.cpp',
         "replication_coordinator_external_state_impl.cpp",
         "sync_source_feedback.cpp",
+        env.Idlc('migrate_tenant_state_machine.idl')[0],
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -1186,6 +1213,7 @@ env.Library(
         '$BUILD_DIR/mongo/util/fail_point',
         'bgsync',
         'drop_pending_collection_reaper',
+        'migrating_tenant_access_blocker',
         'oplog_application',
         'oplog_buffer_collection',
         'oplog_interface_remote',
@@ -1254,6 +1282,7 @@ env.CppUnitTest(
         'repl_set_heartbeat_response_test.cpp',
         'repl_set_tag_test.cpp',
         'repl_set_write_concern_mode_definitions_test.cpp',
+        'replica_set_aware_service_test.cpp',
         'replication_consistency_markers_impl_test.cpp',
         'replication_process_test.cpp',
         'replication_recovery_test.cpp',
@@ -1270,6 +1299,7 @@ env.CppUnitTest(
         'task_runner_test.cpp',
         'task_runner_test_fixture.cpp',
         'vote_requester_test.cpp',
+        'wait_for_majority_service_test.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -1326,6 +1356,7 @@ env.CppUnitTest(
         'repl_coordinator_impl',
         'repl_server_parameters',
         'replica_set_messages',
+        'replica_set_aware_service',
         'replication_consistency_markers_impl',
         'replication_process',
         'replication_recovery',
@@ -1344,6 +1375,7 @@ env.CppUnitTest(
         'sync_source_selector_mock',
         'task_executor_mock',
         'task_runner',
+        'wait_for_majority_service',
     ],
 )
 
@@ -1463,5 +1495,16 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/auth/authservercommon',
         '$BUILD_DIR/mongo/db/commands/authentication_commands',
+    ],
+)
+
+env.Library(
+    target='wait_for_majority_service',
+    source=[
+        'wait_for_majority_service.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/rw_concern_d',
     ],
 )

@@ -57,6 +57,7 @@
 #include "mongo/db/repl/rs_rollback.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/s/shard_identity_rollback_notifier.h"
+#include "mongo/db/shutdown_in_progress_quiesce_info.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
@@ -109,10 +110,11 @@ public:
         ReplicationCoordinator* replicationCoordinator,
         ReplicationCoordinatorExternalState* replicationCoordinatorExternalState,
         BackgroundSync* bgsync);
-    bool shouldStopFetching(const HostAndPort& source,
-                            const rpc::ReplSetMetadata& replMetadata,
-                            const rpc::OplogQueryMetadata& oqMetadata,
-                            const OpTime& lastOpTimeFetched) override;
+    ChangeSyncSourceAction shouldStopFetching(const HostAndPort& source,
+                                              const rpc::ReplSetMetadata& replMetadata,
+                                              const rpc::OplogQueryMetadata& oqMetadata,
+                                              const OpTime& previousOpTimeFetched,
+                                              const OpTime& lastOpTimeFetched) override;
 
 private:
     BackgroundSync* _bgsync;
@@ -125,17 +127,18 @@ DataReplicatorExternalStateBackgroundSync::DataReplicatorExternalStateBackground
     : DataReplicatorExternalStateImpl(replicationCoordinator, replicationCoordinatorExternalState),
       _bgsync(bgsync) {}
 
-bool DataReplicatorExternalStateBackgroundSync::shouldStopFetching(
+ChangeSyncSourceAction DataReplicatorExternalStateBackgroundSync::shouldStopFetching(
     const HostAndPort& source,
     const rpc::ReplSetMetadata& replMetadata,
     const rpc::OplogQueryMetadata& oqMetadata,
+    const OpTime& previousOpTimeFetched,
     const OpTime& lastOpTimeFetched) {
     if (_bgsync->shouldStopFetching()) {
-        return true;
+        return ChangeSyncSourceAction::kStopSyncingAndEnqueueLastBatch;
     }
 
     return DataReplicatorExternalStateImpl::shouldStopFetching(
-        source, replMetadata, oqMetadata, lastOpTimeFetched);
+        source, replMetadata, oqMetadata, previousOpTimeFetched, lastOpTimeFetched);
 }
 
 size_t getSize(const BSONObj& o) {
@@ -490,12 +493,20 @@ void BackgroundSync::_produce() {
 
     // "lastFetched" not used. Already set in _enqueueDocuments.
     Status fetcherReturnStatus = Status::OK();
+    int syncSourceRBID = syncSourceResp.rbid;
+
     DataReplicatorExternalStateBackgroundSync dataReplicatorExternalState(
         _replCoord, _replicationCoordinatorExternalState, this);
     OplogFetcher* oplogFetcher;
     try {
-        auto onOplogFetcherShutdownCallbackFn = [&fetcherReturnStatus](const Status& status) {
+        auto onOplogFetcherShutdownCallbackFn = [&fetcherReturnStatus,
+                                                 &syncSourceRBID](const Status& status, int rbid) {
             fetcherReturnStatus = status;
+            // If the syncSourceResp rbid is uninitialized, syncSourceRBID will be set to the
+            // rbid obtained in the oplog fetcher.
+            if (syncSourceRBID == ReplicationProcess::kUninitializedRollbackId) {
+                syncSourceRBID = rbid;
+            }
         };
         // The construction of OplogFetcher has to be outside bgsync mutex, because it calls
         // replication coordinator.
@@ -560,7 +571,7 @@ void BackgroundSync::_produce() {
         return;
     }
 
-    Seconds blacklistDuration(60);
+    Milliseconds blacklistDuration(60000);
     if (fetcherReturnStatus.code() == ErrorCodes::OplogOutOfOrder) {
         // This is bad because it means that our source
         // has not returned oplog entries in ascending ts order, and they need to be.
@@ -573,8 +584,7 @@ void BackgroundSync::_produce() {
     } else if (fetcherReturnStatus.code() == ErrorCodes::OplogStartMissing) {
         auto opCtx = cc().makeOperationContext();
         auto storageInterface = StorageInterface::get(opCtx.get());
-        _runRollback(
-            opCtx.get(), fetcherReturnStatus, source, syncSourceResp.rbid, storageInterface);
+        _runRollback(opCtx.get(), fetcherReturnStatus, source, syncSourceRBID, storageInterface);
 
         if (bgSyncHangAfterRunRollback.shouldFail()) {
             LOGV2(21095, "bgSyncHangAfterRunRollback failpoint is set");
@@ -599,6 +609,17 @@ void BackgroundSync::_produce() {
             "syncSource"_attr = source,
             "blacklistDuration"_attr = blacklistDuration);
         _replCoord->blacklistSyncSource(source, Date_t::now() + blacklistDuration);
+    } else if (fetcherReturnStatus.code() == ErrorCodes::ShutdownInProgress) {
+        if (auto quiesceInfo = fetcherReturnStatus.extraInfo<ShutdownInProgressQuiesceInfo>()) {
+            blacklistDuration = Milliseconds(quiesceInfo->getRemainingQuiesceTimeMillis());
+            LOGV2_WARNING(
+                4696201,
+                "Sync source was in quiesce mode while we were querying its oplog. Blacklisting "
+                "sync source",
+                "syncSource"_attr = source,
+                "blacklistDuration"_attr = blacklistDuration);
+            _replCoord->blacklistSyncSource(source, Date_t::now() + blacklistDuration);
+        }
     } else if (!fetcherReturnStatus.isOK()) {
         LOGV2_WARNING(21122,
                       "Oplog fetcher stopped querying remote oplog with error: {error}",

@@ -31,17 +31,16 @@
 
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/metadata_manager.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/persistent_task_store.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/s/range_deletion_util.h"
+#include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/s/sharding_runtime_d_params_gen.h"
-#include "mongo/db/s/wait_for_majority_service.h"
-#include "mongo/s/shard_server_test_fixture.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/unittest.h"
 #include "mongo/util/fail_point.h"
 
 namespace mongo {

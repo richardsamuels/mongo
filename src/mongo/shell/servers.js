@@ -146,7 +146,8 @@ function runHangAnalyzer(pids) {
     print(`Running hang analyzer for pids [${pids}]`);
 
     const scriptPath = pathJoin('.', 'buildscripts', 'resmoke.py');
-    const args = ['python', scriptPath, 'hang-analyzer', '-o', 'file', '-o', 'stdout', '-d', pids];
+    const args =
+        ['python', scriptPath, 'hang-analyzer', '-k', '-o', 'file', '-o', 'stdout', '-d', pids];
 
     // Enable core dumps if not an ASAN build.
     if (!_isAddressSanitizerActive()) {
@@ -1160,12 +1161,6 @@ function appendSetParameterArgs(argArray) {
 
         // New options in 3.5.x
         if (!programMajorMinorVersion || programMajorMinorVersion >= 305) {
-            if (jsTest.options().serviceExecutor) {
-                if (!argArrayContains("--serviceExecutor")) {
-                    argArray.push(...["--serviceExecutor", jsTest.options().serviceExecutor]);
-                }
-            }
-
             if (jsTest.options().transportLayer) {
                 if (!argArrayContains("--transportLayer")) {
                     argArray.push(...["--transportLayer", jsTest.options().transportLayer]);

@@ -314,6 +314,88 @@ The config server replica set durably stores settings for the maximum chunk size
 should be automatically split and balanced.
 
 ## Auto-splitting
+When the mongos routes an update or insert to a chunk, the chunk may grow beyond the configured
+chunk size (specified by the server parameter maxChunkSizeBytes) and trigger an auto-split, which
+partitions the oversized chunk into smaller chunks. The shard that houses the chunk is responsible
+for:
+* determining if the chunk should be auto-split
+* selecting the split points
+* committing the split points to the config server
+* refreshing the routing table cache
+* updating in memory chunk size estimates
+
+### Deciding when to auto-split a chunk
+The server schedules an auto-split if:
+1. it detected that the chunk exceeds a threshold based on the maximum chunk size
+2. there is not already a split in progress for the chunk
+
+Every time an update or insert gets routed to a chunk, the server tracks the bytes written to the
+chunk in memory through the collection's ChunkManager. The ChunkManager has a ChunkInfo object for
+each of the collection's entries in the local config.chunks. Through the ChunkManager, the server
+retrieves the chunk's ChunkInfo and uses its ChunkWritesTracker to increment the estimated chunk
+size.
+
+Even if the new size estimate exceeds the maximum chunk size, the server still needs to check that
+there is not already a split in progress for the chunk. If the ChunkWritesTracker is locked, there
+is already a split in progress on the chunk and trying to start another split is prohibited.
+Otherwise, if the chunk is oversized and there is no split for the chunk in progress, the server
+submits the chunk to the ChunkSplitter to be auto-split.
+
+### The auto split task
+The ChunkSplitter is a replica set primary-only service that manages the process of auto-splitting
+chunks. The ChunkSplitter runs auto-split tasks asynchronously - thus, multiple chunks can undergo
+an auto-split concurrently, provided they don't overlap.
+
+To prepare for the split point selection process, the ChunkSplitter flags that an auto-split for the
+chunk is in progress. There may be incoming writes to the original chunk while the split is in
+progress. For this reason, the estimated data size in the ChunkWritesTracker for this chunk is
+reset, and the same counter is used to track the number of bytes written to the chunk while the
+auto-split is in progress.
+
+splitVector manages the bulk of the split point selection logic. First, the data size and number of
+records are retrieved from the storage engine to approximate the number of keys that each chunk
+partition should have. This number is calculated such that if each document were uniform in size,
+each chunk would be half of maxChunkSizeBytes.
+
+If the actual data size is less than the maximum chunk size, no splits are made at all.
+Additionally, if all documents in the chunk have the same shard key, no splits can be made. In this
+case, the chunk may be classified as a jumbo chunk.
+
+In the general case, splitVector:
+* performs an index scan on the shard key index
+* adds every k'th key to the vector of split points, where k is the approximate number of keys each chunk should have
+* returns the split points
+
+If no split points were returned, then the auto-split task gets abandoned and the task is done.
+
+If split points are successfully generated, the ChunkSplitter executes the final steps of the
+auto-split task where the shard:
+* commits the split points to config.chunks on the config server by removing the document containing
+  the original chunk and inserting new documents corresponding to the new chunks indicated by the
+split points
+* refreshes the routing table cache
+* replaces the original oversized chunk's ChunkInfo with a ChunkInfo object for each partition. The
+  estimated data size for each new chunk is the number bytes written to the original chunk while the
+auto-split was in progress
+
+### Top Chunk Optimization
+While there are several optimizations in the auto-split process that won't be covered here, it's
+worthwhile to note the concept of top chunk optimization. If the chunk being split is the first or
+last one on the collection, there is an assumption that the chunk is likely to see more insertions
+if the user is inserting in ascending/descending order with respect to the shard key. So, in top
+chunk optimization, the first (or last) key in the chunk is set as a split point. Once the split
+points get committed to the config server, and the shard refreshes its CatalogCache, the
+ChunkSplitter tries to move the top chunk out of the shard to prevent the hot spot from sitting on a
+single shard.
+
+#### Code references
+* [**ChunkInfo**](https://github.com/mongodb/mongo/blob/18f88ce0680ab946760b599437977ffd60c49678/src/mongo/s/chunk.h#L44) class
+* [**ChunkManager**](https://github.com/mongodb/mongo/blob/master/src/mongo/s/chunk_manager.h) class
+* [**ChunkSplitter**](https://github.com/mongodb/mongo/blob/master/src/mongo/db/s/chunk_splitter.h) class
+* [**ChunkWritesTracker**](https://github.com/mongodb/mongo/blob/master/src/mongo/s/chunk_writes_tracker.h) class
+* [**splitVector**](https://github.com/mongodb/mongo/blob/18f88ce0680ab946760b599437977ffd60c49678/src/mongo/db/s/split_vector.cpp#L61) method
+* [**splitChunk**](https://github.com/mongodb/mongo/blob/18f88ce0680ab946760b599437977ffd60c49678/src/mongo/db/s/split_chunk.cpp#L128) method
+* [**commitSplitChunk**](https://github.com/mongodb/mongo/blob/18f88ce0680ab946760b599437977ffd60c49678/src/mongo/db/s/config/sharding_catalog_manager_chunk_operations.cpp#L316) method where chunk splits are committed
 
 ## Auto-balancing
 
@@ -653,9 +735,10 @@ four steps to this process:
 
 ### Periodic cleanup of the session catalog and transactions table
 
-The logical session cache class holds the periodic job to clean up the session catalog and
-transactions table. Inside the class, this is known as the "reap" function. Every five (5) minutes
-(user-configurable), the following steps will be performed:
+The logical session cache class holds the periodic job to clean up the
+[session catalog](#the-logical-session-catalog) and [transactions table](#the-transactions-table].
+Inside the class, this is known as the "reap" function. Every five (5) minutes (user-configurable),
+the following steps will be performed:
 
 1. Find all sessions in the session catalog that were last checked out more than thirty minutes ago (default session expiration time).
 1. For each session gathered in step 1, if the session no longer exists in the sessions collection (i.e. the session has expired or was explicitly ended), remove the session from the session catalog.
@@ -690,18 +773,23 @@ or yield the session.
 
 The runtime state for a session consists of the last checkout time and operation, the number of operations
 waiting to check out the session, and the number of kills requested. The last checkout time is used by
-the periodic job inside the logical session cache to determine when a session should be reaped from the
-session catalog, whereas the number of operations waiting to check out a session is used to block reaping
-of sessions that are still in use. The last checkout operation is used to determine the operation to kill
-when a session is killed, whereas the number of kills requested is used to make sure that sessions
-are only killed on the first kill request.
+the [periodic job inside the logical session cache](#periodic-cleanup-of-the-session-catalog-and-transactions-table)
+to determine when a session should be reaped from the session catalog, whereas the number of
+operations waiting to check out a session is used to block reaping of sessions that are still in
+use. The last checkout operation is used to determine the operation to kill when a session is
+killed, whereas the number of kills requested is used to make sure that sessions are only killed on
+the first kill request.
 
-To keep the in-memory transaction state of all sessions in sync with the content of the `config.transactions`
-collection (the collection that stores documents used to support retryable writes and transactions, also
-referred to as the transaction table), the transaction state and the session catalog on each mongod is
-[invalidated](https://github.com/mongodb/mongo/blob/56655b06ac46825c5937ccca5947dc84ccbca69c/src/mongo/db/session_catalog_mongod.cpp#L324) whenever the `config.transactions` collection is dropped and whenever
-there is a rollback. When invalidation occurs, all active sessions are killed, and the in-memory transaction
-state is marked as invalid to force it to be [reloaded from storage the next time a session is checked out](https://github.com/mongodb/mongo/blob/r4.3.4/src/mongo/db/session_catalog_mongod.cpp#L426).
+### The transactions table
+
+The runtime state in a node's in-memory session catalog is made durable in the node's
+`config.transactions` collection, also called its transactions table. The in-memory session catalog
+ is
+[invalidated](https://github.com/mongodb/mongo/blob/56655b06ac46825c5937ccca5947dc84ccbca69c/src/mongo/db/session_catalog_mongod.cpp#L324)
+if the `config.transactions` collection is dropped and whenever there is a rollback. When
+invalidation occurs, all active sessions are killed, and the in-memory transaction state is marked
+as invalid to force it to be
+[reloaded from storage the next time a session is checked out](https://github.com/mongodb/mongo/blob/r4.3.4/src/mongo/db/session_catalog_mongod.cpp#L426).
 
 #### Code references
 * [**SessionCatalog class**](https://github.com/mongodb/mongo/blob/r4.3.4/src/mongo/db/session_catalog.h)
@@ -754,8 +842,6 @@ to disk and [updates](https://github.com/mongodb/mongo/blob/r4.3.4/src/mongo/db/
 * How mongos [assigns statement ids to writes in a batch write command](https://github.com/mongodb/mongo/blob/r4.3.4/src/mongo/s/write_ops/batch_write_op.cpp#L483-L486)
 * How mongod [assigns statement ids to insert operations](https://github.com/mongodb/mongo/blob/r4.3.4/src/mongo/db/ops/write_ops_exec.cpp#L573)
 * [Retryable writes specifications](https://github.com/mongodb/specifications/blob/49589d66d49517f10cc8e1e4b0badd61dbb1917e/source/retryable-writes/retryable-writes.rst)
-
-## The historical routing table
 
 ## Transactions
 
@@ -854,6 +940,32 @@ to all participant shards.
 * [**TransactionCoordinatorService class**](https://github.com/mongodb/mongo/blob/r4.3.4/src/mongo/db/s/transaction_coordinator_service.h)
 * [**TransactionCoordinator class**](https://github.com/mongodb/mongo/blob/r4.3.4/src/mongo/db/s/transaction_coordinator.h)
 
+## The historical routing table
+
+When a mongos or mongod executes a command that requires shard targeting, it must use routing information
+that matches the read concern of the command. If the command uses `"snapshot"` read concern, it must use
+the historical routing table at the selected read timestamp. If the command uses any other read concern,
+it must use the latest cached routing table.
+
+The [routing table cache](#the-routing-table-cache) provides an interface for obtaining the routing table
+at a particular timestamp and collection version, namely the `ChunkManager`. The `ChunkManager` has an
+optional clusterTime associated with it and a `RoutingTableHistory` that contains historical routing
+information for all chunks in the collection. That information is stored in an ordered map from the max
+key of each chunk to an entry that contains routing information for the chunk, such as chunk range,
+chunk version and chunk history. The chunk history contains the shard id for the shard that currently
+owns the chunk, and the shard id for any other shards that used to own the chunk in the past
+`minSnapshotHistoryWindowInSeconds` (defaults to 10 seconds). It corresponds to the chunk history in
+the `config.chunks` document for the chunk which gets updated whenever the chunk goes through an
+operation, such as merge or migration. The `ChunkManager` uses this information to determine the
+shards to target for a query. If the clusterTime is not provided, it will return the shards that
+currently own the target chunks. Otherwise, it will return the shards that owned the target chunks
+at that clusterTime and will throw a `StaleChunkHistory` error if it cannot find them.
+
+#### Code references
+* [**ChunkManager class**](https://github.com/mongodb/mongo/blob/r4.3.6/src/mongo/s/chunk_manager.h#L233-L451)
+* [**RoutingTableHistory class**](https://github.com/mongodb/mongo/blob/r4.3.6/src/mongo/s/chunk_manager.h#L70-L231)
+* [**ChunkHistory class**](https://github.com/mongodb/mongo/blob/r4.3.6/src/mongo/s/catalog/type_chunk.h#L131-L145)
+
 ---
 
 # Node startup and shutdown
@@ -907,3 +1019,4 @@ If the mongod server is primary, it will [try to step down](https://github.com/m
 * [Shutdown logic](https://github.com/mongodb/mongo/blob/30f5448e95114d344e6acffa92856536885e35dd/src/mongo/s/mongos_main.cpp#L336-L354) for mongos.
 
 ### Quiesce mode on shutdown
+mongos enters quiesce mode prior to shutdown, to allow short-running operations to finish. During this time, new and existing operations are allowed to run, but `isMaster` requests return a `ShutdownInProgress` error, to indicate that clients should start routing operations to other nodes. Entering quiesce mode is considered a significant topology change in the streaming `isMaster` protocol, so mongos tracks a `TopologyVersion`, which it increments on entering quiesce mode, prompting it to respond to all waiting isMaster requests.

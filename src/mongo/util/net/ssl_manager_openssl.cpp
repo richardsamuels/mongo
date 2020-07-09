@@ -62,6 +62,7 @@
 #include "mongo/util/net/socket_exception.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/net/ssl_parameters_gen.h"
+#include "mongo/util/net/ssl_peer_info.h"
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/read_through_cache.h"
@@ -796,7 +797,6 @@ StatusWith<std::pair<OCSPCertIDSet, Date_t>> parseAndValidateOCSPResponse(
                                  << "Response Status: " << responseStatus);
         case OCSP_RESPONSE_STATUS_TRYLATER:
         case OCSP_RESPONSE_STATUS_INTERNALERROR:
-            // TODO: SERVER-42936 Add support for tlsAllowInvalidCertificates
             return getSSLFailure(str::stream()
                                  << "Error querying the OCSP responder, an error occured in the "
                                  << "responder itself. Response Status: " << responseStatus);
@@ -1044,6 +1044,8 @@ public:
     int SSL_shutdown(SSLConnectionInterface* conn) final;
 
     Future<void> ocspClientVerification(SSL* ssl, const ExecutorPtr& reactor);
+
+    SSLInformationToLog getSSLInformationToLog() const final;
 
 private:
     const int _rolesNid = OBJ_create(mongodbRolesOID.identifier.c_str(),
@@ -1800,8 +1802,8 @@ Status SSLManagerOpenSSL::stapleOCSPResponse(SSL_CTX* context) {
             Milliseconds duration;
             if (swDurationInitial.isOK()) {
                 // if the validation refresh period was set manually, use it
-                if (kOCSPValidationRefreshPeriodSecs != -1) {
-                    duration = Seconds(kOCSPValidationRefreshPeriodSecs);
+                if (kOCSPStaplingRefreshPeriodSecs != -1) {
+                    duration = Seconds(kOCSPStaplingRefreshPeriodSecs);
                 } else {
                     duration = swDurationInitial.getValue();
                 }
@@ -1821,9 +1823,9 @@ Status SSLManagerOpenSSL::stapleOCSPResponse(SSL_CTX* context) {
                                 return;
                             } else {
                                 // if the validation refresh period was set manually, use it
-                                if (kOCSPValidationRefreshPeriodSecs != -1) {
+                                if (kOCSPStaplingRefreshPeriodSecs != -1) {
                                     this->_ocspStaplingAnchor.setPeriod(
-                                        Seconds(kOCSPValidationRefreshPeriodSecs));
+                                        Seconds(kOCSPStaplingRefreshPeriodSecs));
                                 } else {
                                     this->_ocspStaplingAnchor.setPeriod(swDuration.getValue());
                                 }
@@ -1874,21 +1876,11 @@ Status SSLManagerOpenSSL::initSSLContext(SSL_CTX* context,
 
     ::SSL_CTX_set_options(context, options);
 
-    // HIGH - Enable strong ciphers
-    // !EXPORT - Disable export ciphers (40/56 bit)
-    // !aNULL - Disable anonymous auth ciphers
-    // @STRENGTH - Sort ciphers based on strength
-    std::string cipherConfig = "HIGH:!EXPORT:!aNULL@STRENGTH";
-
-    // Allow the cipher configuration string to be overriden by --sslCipherConfig
-    if (!params.sslCipherConfig.empty()) {
-        cipherConfig = params.sslCipherConfig;
-    }
-
-    if (0 == ::SSL_CTX_set_cipher_list(context, cipherConfig.c_str())) {
+    if (0 == ::SSL_CTX_set_cipher_list(context, params.sslCipherConfig.c_str())) {
         return Status(ErrorCodes::InvalidSSLConfiguration,
-                      str::stream() << "Can not set supported cipher suites: "
-                                    << getSSLErrorMessage(ERR_get_error()));
+                      str::stream() << "Can not set supported cipher suites with config string \""
+                                    << params.sslCipherConfig
+                                    << "\": " << getSSLErrorMessage(ERR_get_error()));
     }
 
     // We use the address of the context as the session id context.
@@ -2758,6 +2750,11 @@ void SSLManagerOpenSSL::_handleSSLError(SSLConnectionOpenSSL* conn, int ret) {
     }
     _flushNetworkBIO(conn);
     throwSocketError(errToThrow, conn->socket->remoteString());
+}
+
+SSLInformationToLog SSLManagerOpenSSL::getSSLInformationToLog() const {
+    SSLInformationToLog info;
+    return info;
 }
 
 }  // namespace mongo

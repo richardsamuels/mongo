@@ -51,7 +51,7 @@ public:
 
     void enterTerminalShutdown() final;
 
-    bool enterQuiesceModeIfSecondary() final;
+    bool enterQuiesceModeIfSecondary(Milliseconds quiesceTime) final;
 
     bool inQuiesceMode() const final;
 
@@ -136,6 +136,10 @@ public:
     OpTime getMyLastDurableOpTime() const final;
     OpTimeAndWallTime getMyLastDurableOpTimeAndWallTime() const final;
 
+    Status waitUntilMajorityOpTime(OperationContext* opCtx,
+                                   OpTime targetOpTime,
+                                   boost::optional<Date_t> deadline) final;
+
     Status waitUntilOpTimeForReadUntil(OperationContext*,
                                        const ReadConcernArgs&,
                                        boost::optional<Date_t>) final;
@@ -208,10 +212,11 @@ public:
 
     void resetLastOpTimesFromOplog(OperationContext*, DataConsistency) final;
 
-    bool shouldChangeSyncSource(const HostAndPort&,
-                                const rpc::ReplSetMetadata&,
-                                const rpc::OplogQueryMetadata&,
-                                const OpTime&) final;
+    ChangeSyncSourceAction shouldChangeSyncSource(const HostAndPort&,
+                                                  const rpc::ReplSetMetadata&,
+                                                  const rpc::OplogQueryMetadata&,
+                                                  const OpTime&,
+                                                  const OpTime&) final;
 
     OpTime getLastCommittedOpTime() const final;
 

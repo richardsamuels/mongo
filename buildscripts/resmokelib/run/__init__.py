@@ -21,8 +21,7 @@ try:
 except ImportError:
     pass
 
-# pylint: disable=wrong-import-position
-import buildscripts.resmokelib.parser as main_parser
+from buildscripts.resmokelib import parser as main_parser
 from buildscripts.resmokelib import config
 from buildscripts.resmokelib import configure_resmoke
 from buildscripts.resmokelib import errors
@@ -58,7 +57,7 @@ class TestRunner(Subcommand):  # pylint: disable=too-many-instance-attributes
     def _setup_logging(self):
         logging.loggers.configure_loggers()
         logging.flush.start_thread()
-        self._exec_logger = logging.loggers.EXECUTOR_LOGGER
+        self._exec_logger = logging.loggers.ROOT_EXECUTOR_LOGGER
         self._resmoke_logger = logging.loggers.new_resmoke_logger()
 
     def _exit_logging(self):
@@ -728,9 +727,6 @@ class RunPlugin(PluginInterface):
             "--seed", type=int, dest="seed", metavar="SEED",
             help=("Seed for the random number generator. Useful in combination with the"
                   " --shuffle option for producing a consistent test execution order."))
-
-        parser.add_argument("--serviceExecutor", dest="service_executor", metavar="EXECUTOR",
-                            help="The service executor used by jstests")
 
         parser.add_argument("--transportLayer", dest="transport_layer", metavar="TRANSPORT",
                             help="The transport layer used by jstests")

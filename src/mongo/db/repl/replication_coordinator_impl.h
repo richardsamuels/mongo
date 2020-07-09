@@ -106,7 +106,7 @@ public:
 
     virtual void enterTerminalShutdown() override;
 
-    virtual bool enterQuiesceModeIfSecondary() override;
+    virtual bool enterQuiesceModeIfSecondary(Milliseconds quiesceTime) override;
 
     virtual bool inQuiesceMode() const override;
 
@@ -187,6 +187,10 @@ public:
 
     virtual OpTime getMyLastDurableOpTime() const override;
     virtual OpTimeAndWallTime getMyLastDurableOpTimeAndWallTime() const override;
+
+    virtual Status waitUntilMajorityOpTime(OperationContext* opCtx,
+                                           OpTime targetOpTime,
+                                           boost::optional<Date_t> deadline = boost::none) override;
 
     virtual Status waitUntilOpTimeForReadUntil(OperationContext* opCtx,
                                                const ReadConcernArgs& readConcern,
@@ -279,10 +283,11 @@ public:
     virtual void resetLastOpTimesFromOplog(OperationContext* opCtx,
                                            DataConsistency consistency) override;
 
-    virtual bool shouldChangeSyncSource(const HostAndPort& currentSource,
-                                        const rpc::ReplSetMetadata& replMetadata,
-                                        const rpc::OplogQueryMetadata& oqMetadata,
-                                        const OpTime& lastOpTimeFetched) override;
+    virtual ChangeSyncSourceAction shouldChangeSyncSource(const HostAndPort& currentSource,
+                                                          const rpc::ReplSetMetadata& replMetadata,
+                                                          const rpc::OplogQueryMetadata& oqMetadata,
+                                                          const OpTime& previousOpTimeFetched,
+                                                          const OpTime& lastOpTimeFetched) override;
 
     virtual OpTime getLastCommittedOpTime() const override;
     virtual OpTimeAndWallTime getLastCommittedOpTimeAndWallTime() const override;
@@ -1180,6 +1185,11 @@ private:
                                   StatusWith<int> myIndex);
 
     /**
+     * Calculates the time (in millis) left in quiesce mode and converts the value to int64.
+     */
+    long long _calculateRemainingQuiesceTimeMillis() const;
+
+    /**
      * Fills an IsMasterResponse with the appropriate replication related fields. horizonString
      * should be passed in if hasValidConfig is true.
      */
@@ -1399,13 +1409,6 @@ private:
     Status _waitUntilOpTime(OperationContext* opCtx,
                             OpTime targetOpTime,
                             boost::optional<Date_t> deadline = boost::none);
-
-    /**
-     * Waits until the majority committed snapshot is at least the 'targetOpTime'.
-     */
-    Status _waitUntilMajorityOpTime(OperationContext* opCtx,
-                                    OpTime targetOpTime,
-                                    boost::optional<Date_t> deadline = boost::none);
 
     /**
      * Waits until the optime of the current node is at least the opTime specified in 'readConcern'.
@@ -1650,6 +1653,9 @@ private:
 
     // If we're in quiesce mode.  If true, we'll respond to isMaster requests with ok:0.
     bool _inQuiesceMode = false;  // (M)
+
+    // The deadline until which quiesce mode will last.
+    Date_t _quiesceDeadline;  // (M)
 
     // The cached value of the 'counter' field in the server's TopologyVersion.
     AtomicWord<int64_t> _cachedTopologyVersionCounter;  // (S)

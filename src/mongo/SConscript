@@ -59,7 +59,32 @@ baseEnv = env.Clone()
 if use_libunwind == True:
     baseEnv.InjectThirdParty('unwind')
 
-stacktrace_impl_cpp = [ File('util/stacktrace_${TARGET_OS_FAMILY}.cpp') ]
+quick_exit_env = baseEnv.Clone()
+if has_option('gcov'):
+    quick_exit_env.Append(
+        CPPDEFINES=[
+            'MONGO_GCOV',
+        ],
+    )
+quick_exit_obj = baseEnv.LibraryObject(
+    target='quick_exit',
+    source=[
+        'util/quick_exit.cpp',
+    ],
+)[0]
+
+debugger_env = baseEnv.Clone()
+if has_option("gdbserver"):
+    debugger_env.Append(CPPDEFINES=["USE_GDBSERVER"])
+elif has_option("lldb-server"):
+    debugger_env.Append(CPPDEFINES=["USE_LLDB_SERVER"])
+
+debugger_obj = debugger_env.LibraryObject(
+    target='debugger',
+    source=[
+        'util/debugger.cpp',
+    ],
+)[0]
 
 baseEnv.Library(
     target='base',
@@ -119,9 +144,9 @@ baseEnv.Library(
         'logv2/log_tag.cpp',
         'logv2/log_util.cpp',
         'logv2/plain_formatter.cpp',
-        'logv2/shared_access_fstream.cpp',
         'logv2/ramlog.cpp',
         'logv2/redaction.cpp',
+        'logv2/shared_access_fstream.cpp',
         'logv2/text_formatter.cpp',
         'platform/decimal128.cpp',
         'platform/mutex.cpp',
@@ -141,7 +166,6 @@ baseEnv.Library(
         'util/concurrency/idle_thread_block.cpp',
         'util/concurrency/thread_name.cpp',
         'util/duration.cpp',
-        'util/str_escape.cpp',
         'util/errno_util.cpp',
         'util/exception_filter_win32.cpp',
         'util/exit.cpp',
@@ -156,33 +180,33 @@ baseEnv.Library(
         'util/stacktrace_somap.cpp',
         'util/stacktrace_threads.cpp',
         'util/str.cpp',
+        'util/str_escape.cpp',
         'util/system_clock_source.cpp',
         'util/system_tick_source.cpp',
-        'util/text.cpp',
         'util/testing_proctor.cpp',
+        'util/text.cpp',
         'util/thread_safety_context.cpp',
         'util/time_support.cpp',
         'util/timer.cpp',
         'util/uuid.cpp',
         'util/version.cpp',
+        debugger_obj,
+        quick_exit_obj,
     ],
     # NOTE: This library *must not* depend on any libraries than
     # the ones declared here. Do not add to this list.
     LIBDEPS=[
         '$BUILD_DIR/third_party/murmurhash3/murmurhash3',
         '$BUILD_DIR/third_party/shim_abseil',
-        '$BUILD_DIR/third_party/shim_allocator',
         '$BUILD_DIR/third_party/shim_boost',
         '$BUILD_DIR/third_party/shim_fmt',
+    ],
+    LIBDEPS_PRIVATE=[
         '$BUILD_DIR/third_party/shim_intel_decimal128',
         '$BUILD_DIR/third_party/shim_pcrecpp',
         '$BUILD_DIR/third_party/shim_unwind' if use_libunwind else [],
         'boost_assert_shim',
         'stdx/stdx',
-        'util/quick_exit',
-    ],
-    LIBDEPS_PRIVATE=[
-        'util/debugger',
     ],
     AIB_COMPONENT='platform',
 )
@@ -363,7 +387,6 @@ mongod = env.Program(
         # mongod_initializers.
         'base',
         'mongod_main',
-        'util/quick_exit',
     ],
     AIB_COMPONENT="mongod",
     AIB_COMPONENTS_EXTRA=[
@@ -444,11 +467,11 @@ env.Library(
         'db/repl/repl_coordinator_impl',
         'db/repl/repl_set_commands',
         'db/repl/repl_settings',
+        'db/repl/replica_set_aware_service',
         'db/repl/rs_rollback',
         'db/repl/serveronly_repl',
         'db/repl/storage_interface_impl',
         'db/repl/topology_coordinator',
-        'db/replica_set_aware_service',
         'db/rw_concern_d',
         'db/s/balancer',
         'db/s/sessions_collection_config_server',
@@ -554,6 +577,7 @@ env.Library(
         'db/repl/serveronly_repl',
         'db/repl/storage_interface_impl',
         'db/repl/topology_coordinator',
+        'db/repl/wait_for_majority_service',
         'db/s/sessions_collection_config_server',
         'db/s/sharding_runtime_d',
         'db/serverinit',
@@ -589,11 +613,6 @@ env.Library(
     ],
 )
 
-hygienic = get_option('install-mode') == 'hygienic'
-
-if not hygienic:
-    env.Default(env.Install('#/', mongod))
-
 if env.TargetOSIs('windows'):
     generatedServerManifest = env.Substfile(
         's/mongos.manifest.in',
@@ -622,9 +641,6 @@ mongotrafficreader = env.Program(
     ],
 )
 
-if not hygienic:
-    env.Install('#/', mongotrafficreader)
-
 # mongos
 mongos = env.Program(
     target='mongos',
@@ -640,7 +656,6 @@ mongos = env.Program(
         # mongos_initializers.
         'base',
         'mongos_main',
-        'util/quick_exit'
     ],
     AIB_COMPONENT="mongos",
     AIB_COMPONENTS_EXTRA=[
@@ -767,9 +782,6 @@ env.Library(
 )
 
 
-if not hygienic:
-    env.Install('#/', mongos)
-
 # --- shell ---
 
 if not has_option('noshell') and usemozjs:
@@ -875,6 +887,7 @@ if not has_option('noshell') and usemozjs:
             # library to inject a static or mongo initializer to mongo,
             # please add that library as a private libdep of
             # mongo_initializers.
+            "$BUILD_DIR/third_party/shim_pcrecpp",
             "mongo_initializers",
             "shell/linenoise",
             "shell/shell_utils",
@@ -887,113 +900,30 @@ if not has_option('noshell') and usemozjs:
         ],
     )
 
-    if not hygienic:
-        shellEnv.Install( '#/', mongo_shell )
 else:
     shellEnv = None
 
 #  ----  INSTALL -------
 
-# binaries
-
-distBinaries = []
-distDebugSymbols = []
-
-def add_exe( v ):
-    return "${PROGPREFIX}%s${PROGSUFFIX}" % v
-
-def failMissingObjCopy(env, target, source):
-    env.FatalError("Generating debug symbols requires objcopy, please set the OBJCOPY variable.")
-
-def installBinary( e, name ):
-
-    if hygienic:
-        return
-
-    debug_sym_name = name
-    name = add_exe( name )
-
-    debug_sym_cmd = None
-    if e.TargetOSIs('linux', 'solaris'):
-        if 'OBJCOPY' not in e:
-            debug_sym_cmd = failMissingObjCopy
-        else:
-            debug_sym_cmd = '${OBJCOPY} --only-keep-debug ${SOURCE} ${TARGET}'
-        debug_sym_name += '.debug'
-    elif e.TargetOSIs('darwin'):
-        debug_sym_name += '.dSYM'
-        debug_sym_cmd = 'dsymutil -num-threads=1 -o ${TARGET} ${SOURCE}'
-    elif e.ToolchainIs('msvc'):
-        debug_sym_name += '.pdb'
-        distBinaries.append(debug_sym_name)
-        distDebugSymbols.append(debug_sym_name)
-
-    if debug_sym_cmd:
-        debug_sym = e.Command(
-            debug_sym_name,
-            name,
-            debug_sym_cmd
-        )
-        e.NoCache(debug_sym)
-        e.Install("#/", debug_sym)
-        e.Alias('debugsymbols', debug_sym)
-        distDebugSymbols.append(debug_sym)
-
-    if env.TargetOSIs('linux', 'solaris') and (not has_option("nostrip")):
-        stripped_name = 'stripped/%s' % name
-        strip_cmd = e.Command(
-            stripped_name,
-            [name, debug_sym],
-            '${OBJCOPY} --strip-debug --add-gnu-debuglink ${SOURCES[1]} ${SOURCES[0]} $TARGET'
-        )
-        e.NoCache(stripped_name)
-        distBinaries.append(stripped_name)
-    else:
-        distBinaries.append(name)
-
-    inst = e.Install( "$DESTDIR/bin", name )
-
-    if env.TargetOSIs('posix'):
-        e.AddPostAction( inst, 'chmod 755 $TARGET' )
-
-# legacy tools
-if not hygienic:
-    env.Alias("tools", "#/" + add_exe("mongobridge"))
-
-installBinary( env, "mongod" )
-installBinary( env, "mongos" )
-
-if shellEnv is not None:
-    installBinary( shellEnv, "mongo" )
-    if not hygienic:
-        env.Alias( "core", [ '#/%s' % b for b in [ add_exe( "mongo" ) ] ] )
-
-if not hygienic:
-    env.Alias( "core", [ '#/%s' % b for b in [ add_exe( "mongod" ), add_exe( "mongos" ) ] ] )
-
 # Stage the top-level mongodb banners
 distsrc = env.Dir('#distsrc')
-if hygienic:
-    env.AutoInstall(
-        target='$PREFIX',
-        source=[
-            distsrc.File('README'),
-            # TODO: we need figure out what to do when we use a different
-            # THIRD-PARTY-NOTICES for example, with Embedded
-            distsrc.File('THIRD-PARTY-NOTICES'),
-            distsrc.File('MPL-2'),
-        ],
-        AIB_COMPONENT='common',
-        AIB_ROLE='base',
-    )
-else:
-    env.Append(MODULE_BANNERS = [distsrc.File('README'),
-                                 distsrc.File('THIRD-PARTY-NOTICES'),
-                                 distsrc.File('MPL-2')])
+
+
+env.AutoInstall(
+    target='$PREFIX',
+    source=[
+        distsrc.File('README'),
+        # TODO: we need figure out what to do when we use a different
+        # THIRD-PARTY-NOTICES for example, with Embedded
+        distsrc.File('THIRD-PARTY-NOTICES'),
+        distsrc.File('MPL-2'),
+    ],
+    AIB_COMPONENT='common',
+    AIB_ROLE='base',
+)
 
 # If no module has introduced a file named LICENSE-Enterprise.txt then this
 # is a Community build, so inject the AGPL and the Community license
-
 enterprise_license = [banner for banner in env["MODULE_BANNERS"] if banner.name ==  "LICENSE-Enterprise.txt"]
 if not enterprise_license:
     env.Append(MODULE_BANNERS = [distsrc.File('LICENSE-Community.txt')])
@@ -1005,30 +935,13 @@ if not len(module_banner_filenames) == len(env['MODULE_BANNERS']):
     # TODO: Be nice and identify conflicts in error.
     env.FatalError("ERROR: Filename conflicts exist in module banners.")
 
-if hygienic:
-    env.AutoInstall(
-        target='$PREFIX',
-        source=env.get('MODULE_BANNERS', []),
-        AIB_COMPONENT='common',
-        AIB_COMPONENTS_EXTRA=['dist', 'dist-test'],
-        AIB_ROLE='base',
-    )
-
-# Build a set of directories containing module banners, and use that
-# to build a --transform option for each directory so that the files
-# are tar'ed up to the proper location.
-module_banner_dirs = set([Dir('#').rel_path(f.get_dir()) for f in env['MODULE_BANNERS']])
-module_banner_transforms = ["--transform %s=$SERVER_DIST_BASENAME" % d for d in module_banner_dirs]
-
-# Allow modules to map original file name directories to subdirectories
-# within the archive (e.g. { "src/mongo/db/modules/enterprise/docs": "snmp"})
-archive_addition_transforms = []
-for full_dir, archive_dir in list(env["ARCHIVE_ADDITION_DIR_MAP"].items()):
-  archive_addition_transforms.append("--transform \"%s=$SERVER_DIST_BASENAME/%s\"" %
-                                     (full_dir, archive_dir))
-
-for target in env["DIST_BINARIES"]:
-    installBinary(env, "db/modules/" + target)
+env.AutoInstall(
+    target='$PREFIX',
+    source=env.get('MODULE_BANNERS', []),
+    AIB_COMPONENT='common',
+    AIB_COMPONENTS_EXTRA=['dist', 'dist-test'],
+    AIB_ROLE='base',
+)
 
 # Set the download url to the right place
 compass_type = 'compass-community'
@@ -1052,64 +965,11 @@ compass_installer = env.Substfile(
   ],
 )
 
-distBinaries.append(compass_installer)
-
-if not hygienic:
-    compass_script_installer = env.Install("$DESTDIR/bin", compass_installer)
-else:
-    compass_script_installer = env.AutoInstall(
-        target='$PREFIX_BINDIR',
-        source=[
-            compass_installer,
-        ],
-        AIB_COMPONENT='dist',
-        AIB_ROLE='runtime',
-    )
-
-if env.TargetOSIs('posix'):
-    env.AddPostAction( compass_script_installer, 'chmod 755 $TARGET' )
-    env.AddPostAction( compass_installer, 'chmod 755 $TARGET' )
-
-if not hygienic:
-    server_archive = env.Command(
-        target='#/${SERVER_ARCHIVE}',
-        source=['#buildscripts/make_archive.py'] + env["MODULE_BANNERS"] + env["ARCHIVE_ADDITIONS"] + distBinaries,
-        action=' '.join(
-            ['$PYTHON ${SOURCES[0]} -o $TARGET'] +
-            archive_addition_transforms +
-            module_banner_transforms +
-            [
-                '--transform $BUILD_DIR/mongo/db/modules/enterprise=$SERVER_DIST_BASENAME/bin',
-                '--transform $BUILD_DIR/mongo/stripped/db/modules/enterprise=$SERVER_DIST_BASENAME/bin',
-                '--transform $BUILD_DIR/mongo/stripped=$SERVER_DIST_BASENAME/bin',
-                '--transform $BUILD_DIR/mongo=$SERVER_DIST_BASENAME/bin',
-                '--transform src/mongo/installer/compass=$SERVER_DIST_BASENAME/bin',
-                '${TEMPFILE(SOURCES[1:])}'
-            ],
-        ),
-        BUILD_DIR=env.Dir('$BUILD_DIR').path
-    )
-
-    env.Alias("dist", server_archive)
-    env.NoCache(server_archive)
-
-    debug_symbols_dist = env.Command(
-        target='#/${SERVER_DIST_BASENAME}-debugsymbols${DIST_ARCHIVE_SUFFIX}',
-        source=['#buildscripts/make_archive.py'] + distDebugSymbols,
-        action=' '.join(
-            [
-                '$PYTHON ${SOURCES[0]} -o $TARGET',
-                '--transform $BUILD_DIR/mongo/db/modules/enterprise=$SERVER_DIST_BASENAME',
-                '--transform $BUILD_DIR/mongo=$SERVER_DIST_BASENAME',
-                '${TEMPFILE(SOURCES[1:])}',
-            ]
-        ),
-        BUILD_DIR=env.Dir('$BUILD_DIR').path
-    )
-
-    env.Alias('dist-debugsymbols', debug_symbols_dist)
-    env.NoCache(debug_symbols_dist)
-
-#final alias
-if not hygienic:
-    env.Alias( "install", "$DESTDIR" )
+compass_script_installer = env.AutoInstall(
+    target='$PREFIX_BINDIR',
+    source=[
+        compass_installer,
+    ],
+    AIB_COMPONENT='dist',
+    AIB_ROLE='runtime',
+)

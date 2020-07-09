@@ -65,6 +65,8 @@ using std::set;
 
 using IndexVersion = IndexDescriptor::IndexVersion;
 
+MONGO_FAIL_POINT_DEFINE(hangIndexBuildDuringBulkLoadPhase);
+
 namespace {
 
 // Reserved RecordId against which multikey metadata keys are indexed.
@@ -471,9 +473,13 @@ public:
 
     int64_t getKeysInserted() const final;
 
-    State getState() const final;
+    Sorter::State getSorterState() const final;
+
+    void persistDataForShutdown() final;
 
 private:
+    void _addMultikeyMetadataKeysIntoSorter();
+
     std::unique_ptr<Sorter> _sorter;
     IndexCatalogEntry* _indexCatalogEntry;
     int64_t _keysInserted = 0;
@@ -489,10 +495,6 @@ private:
     // These are inserted into the sorter after all normal data keys have been added, just
     // before the bulk build is committed.
     KeyStringSet _multikeyMetadataKeys;
-
-    // The RecordId corresponding to the object most recently inserted using this BulkBuilder, or
-    // boost::none if nothing has been inserted into the sorter or done() has already been called.
-    boost::optional<RecordId> _lastRecordIdInserted;
 };
 
 std::unique_ptr<IndexAccessMethod::BulkBuilder> AbstractIndexAccessMethod::initiateBulk(
@@ -573,7 +575,6 @@ Status AbstractIndexAccessMethod::BulkBuilderImpl::insert(OperationContext* opCt
     _isMultiKey = _isMultiKey ||
         _indexCatalogEntry->accessMethod()->shouldMarkIndexAsMultikey(
             keys->size(), _multikeyMetadataKeys, *multikeyPaths);
-    _lastRecordIdInserted = loc;
 
     return Status::OK();
 }
@@ -588,11 +589,7 @@ bool AbstractIndexAccessMethod::BulkBuilderImpl::isMultikey() const {
 
 IndexAccessMethod::BulkBuilder::Sorter::Iterator*
 AbstractIndexAccessMethod::BulkBuilderImpl::done() {
-    for (const auto& keyString : _multikeyMetadataKeys) {
-        _sorter->add(keyString, mongo::NullValue());
-        ++_keysInserted;
-    }
-    _lastRecordIdInserted = boost::none;
+    _addMultikeyMetadataKeysIntoSorter();
     return _sorter->done();
 }
 
@@ -600,12 +597,21 @@ int64_t AbstractIndexAccessMethod::BulkBuilderImpl::getKeysInserted() const {
     return _keysInserted;
 }
 
-AbstractIndexAccessMethod::BulkBuilder::State AbstractIndexAccessMethod::BulkBuilderImpl::getState()
-    const {
-    return {_lastRecordIdInserted,
-            _sorter->getTempDir(),
-            _sorter->getFileName(),
-            _sorter->getRangeInfos()};
+AbstractIndexAccessMethod::BulkBuilder::Sorter::State
+AbstractIndexAccessMethod::BulkBuilderImpl::getSorterState() const {
+    return _sorter->getState();
+}
+
+void AbstractIndexAccessMethod::BulkBuilderImpl::persistDataForShutdown() {
+    _addMultikeyMetadataKeysIntoSorter();
+    _sorter->persistDataForShutdown();
+}
+
+void AbstractIndexAccessMethod::BulkBuilderImpl::_addMultikeyMetadataKeysIntoSorter() {
+    for (const auto& keyString : _multikeyMetadataKeys) {
+        _sorter->add(keyString, mongo::NullValue());
+        ++_keysInserted;
+    }
 }
 
 Status AbstractIndexAccessMethod::commitBulk(OperationContext* opCtx,
@@ -634,7 +640,7 @@ Status AbstractIndexAccessMethod::commitBulk(OperationContext* opCtx,
 
     KeyString::Value previousKey;
 
-    while (it->more()) {
+    for (int64_t i = 0; it->more(); i++) {
         opCtx->checkForInterrupt();
 
         WriteUnitOfWork wunit(opCtx);
@@ -677,6 +683,17 @@ Status AbstractIndexAccessMethod::commitBulk(OperationContext* opCtx,
                                               _descriptor->collation());
             }
         }
+
+        hangIndexBuildDuringBulkLoadPhase.executeIf(
+            [i](const BSONObj& data) {
+                LOGV2(4924400,
+                      "Hanging index build during bulk load phase due to "
+                      "'hangIndexBuildDuringBulkLoadPhase' failpoint",
+                      "iteration"_attr = i);
+
+                hangIndexBuildDuringBulkLoadPhase.pauseWhileSet();
+            },
+            [i](const BSONObj& data) { return i == data["iteration"].numberLong(); });
 
         Status status = builder->addKey(data.first);
 

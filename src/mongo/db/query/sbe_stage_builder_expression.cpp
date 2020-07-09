@@ -445,7 +445,6 @@ public:
     void visit(ExpressionInternalFindPositional* expr) final {}
     void visit(ExpressionInternalFindElemMatch* expr) final {}
     void visit(ExpressionFunction* expr) final {}
-    void visit(ExpressionInternalRemoveFieldTombstones* expr) final {}
     void visit(ExpressionRandom* expr) final {}
 
 private:
@@ -631,7 +630,6 @@ public:
     void visit(ExpressionInternalFindPositional* expr) final {}
     void visit(ExpressionInternalFindElemMatch* expr) final {}
     void visit(ExpressionFunction* expr) final {}
-    void visit(ExpressionInternalRemoveFieldTombstones* expr) final {}
     void visit(ExpressionRandom* expr) final {}
 
 private:
@@ -894,7 +892,17 @@ public:
         unsupportedExpression(expr->getOpName());
     }
     void visit(ExpressionIsNumber* expr) final {
-        unsupportedExpression(expr->getOpName());
+        auto frameId = _context->frameIdGenerator->generate();
+        auto binds = sbe::makeEs(_context->popExpr());
+        sbe::EVariable inputRef(frameId, 0);
+
+        auto exprIsNum = sbe::makeE<sbe::EIf>(
+            sbe::makeE<sbe::EFunction>("exists", sbe::makeEs(inputRef.clone())),
+            sbe::makeE<sbe::EFunction>("isNumber", sbe::makeEs(inputRef.clone())),
+            sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Boolean, false));
+
+        _context->pushExpr(
+            sbe::makeE<sbe::ELocalBind>(frameId, std::move(binds), std::move(exprIsNum)));
     }
     void visit(ExpressionLet* expr) final {
         // The evaluated result of the $let is the evaluated result of its "in" field, which is
@@ -1179,9 +1187,6 @@ public:
     }
     void visit(ExpressionFunction* expr) final {
         unsupportedExpression("$function");
-    }
-    void visit(ExpressionInternalRemoveFieldTombstones* expr) final {
-        unsupportedExpression("$internalRemoveFieldTombstones");
     }
 
     void visit(ExpressionRandom* expr) final {

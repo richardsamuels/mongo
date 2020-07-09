@@ -69,6 +69,9 @@ const NamespaceString NamespaceString::kTransactionCoordinatorsNamespace(
 const NamespaceString NamespaceString::kMigrationCoordinatorsNamespace(NamespaceString::kConfigDb,
                                                                        "migrationCoordinators");
 
+const NamespaceString NamespaceString::kMigrationDonorsNamespace(NamespaceString::kConfigDb,
+                                                                 "migrationDonors");
+
 const NamespaceString NamespaceString::kShardConfigCollectionsNamespace(NamespaceString::kConfigDb,
                                                                         "cache.collections");
 const NamespaceString NamespaceString::kShardConfigDatabasesNamespace(NamespaceString::kConfigDb,
@@ -100,8 +103,6 @@ bool NamespaceString::isLegalClientSystemNS() const {
         if (coll() == kServerConfigurationNamespace.coll())
             return true;
         if (coll() == kSystemKeysNamespace.coll())
-            return true;
-        if (coll() == "system.new_users")
             return true;
         if (coll() == "system.backup_users")
             return true;

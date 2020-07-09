@@ -70,7 +70,7 @@ public:
 
     virtual void enterTerminalShutdown();
 
-    virtual bool enterQuiesceModeIfSecondary();
+    virtual bool enterQuiesceModeIfSecondary(Milliseconds quieseTime);
 
     virtual bool inQuiesceMode() const;
 
@@ -153,6 +153,10 @@ public:
 
     virtual OpTimeAndWallTime getMyLastDurableOpTimeAndWallTime() const;
     virtual OpTime getMyLastDurableOpTime() const;
+
+    virtual Status waitUntilMajorityOpTime(OperationContext* opCtx,
+                                           OpTime targetOpTime,
+                                           boost::optional<Date_t> deadline) override;
 
     virtual Status waitUntilOpTimeForRead(OperationContext* opCtx,
                                           const ReadConcernArgs& settings) override;
@@ -243,10 +247,11 @@ public:
 
     bool lastOpTimesWereReset() const;
 
-    virtual bool shouldChangeSyncSource(const HostAndPort& currentSource,
-                                        const rpc::ReplSetMetadata& replMetadata,
-                                        const rpc::OplogQueryMetadata& oqMetadata,
-                                        const OpTime& lastOpTimeFetched);
+    virtual ChangeSyncSourceAction shouldChangeSyncSource(const HostAndPort& currentSource,
+                                                          const rpc::ReplSetMetadata& replMetadata,
+                                                          const rpc::OplogQueryMetadata& oqMetadata,
+                                                          const OpTime& previousOpTimeFetched,
+                                                          const OpTime& lastOpTimeFetched);
 
     virtual OpTime getLastCommittedOpTime() const;
 
@@ -364,19 +369,24 @@ private:
     ServiceContext* const _service;
     ReplSettings _settings;
     StorageInterface* _storage = nullptr;
-    MemberState _memberState;
-    OpTime _myLastDurableOpTime;
-    Date_t _myLastDurableWallTime;
-    OpTime _myLastAppliedOpTime;
-    Date_t _myLastAppliedWallTime;
-    ReplSetConfig _getConfigReturnValue;
     AwaitReplicationReturnValueFunction _awaitReplicationReturnValueFunction = [](OperationContext*,
                                                                                   const OpTime&) {
         return StatusAndDuration(Status::OK(), Milliseconds(0));
     };
-    bool _alwaysAllowWrites = false;
-    bool _resetLastOpTimesCalled = false;
+
+    // Guards all the variables below
+    mutable Mutex _mutex = MONGO_MAKE_LATCH("ReplicationCoordinatorExternalStateMock::_mutex");
+
+    MemberState _memberState;
+    ReplSetConfig _getConfigReturnValue;
+    OpTime _myLastDurableOpTime;
+    Date_t _myLastDurableWallTime;
+    OpTime _myLastAppliedOpTime;
+    Date_t _myLastAppliedWallTime;
+
     long long _term = OpTime::kInitialTerm;
+    bool _resetLastOpTimesCalled = false;
+    bool _alwaysAllowWrites = false;
     bool _canAcceptNonLocalWrites = false;
 };
 

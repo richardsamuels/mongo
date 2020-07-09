@@ -273,6 +273,7 @@ let testCases = {
     replSetUpdatePosition: {skip: "does not return user data"},
     replSetResizeOplog: {skip: "does not return user data"},
     resetError: {skip: "does not return user data"},
+    reshardCollection: {skip: "primary only"},
     resync: {skip: "primary only"},
     revokePrivilegesFromRole: {skip: "primary only"},
     revokeRolesFromRole: {skip: "primary only"},
@@ -280,6 +281,7 @@ let testCases = {
     rolesInfo: {skip: "primary only"},
     saslContinue: {skip: "primary only"},
     saslStart: {skip: "primary only"},
+    sbe: {skip: "internal command"},
     serverStatus: {skip: "does not return user data"},
     setCommittedSnapshot: {skip: "does not return user data"},
     setDefaultRWConcern: {skip: "primary only"},
@@ -313,12 +315,12 @@ let testCases = {
     whatsmyuri: {skip: "does not return user data"}
 };
 
-commandsRemovedFromMongosIn46.forEach(function(cmd) {
+commandsRemovedFromMongosSinceLastLTS.forEach(function(cmd) {
     testCases[cmd] = {skip: "must define test coverage for 4.4 backwards compatibility"};
 });
 
-// Set the secondaries to priority 0 and votes 0 to prevent the primaries from stepping down.
-let rsOpts = {nodes: [{rsConfig: {votes: 1}}, {rsConfig: {priority: 0, votes: 0}}]};
+// Set the secondaries to priority 0 to prevent the primaries from stepping down.
+let rsOpts = {nodes: [{}, {rsConfig: {priority: 0}}]};
 let st = new ShardingTest({mongos: 2, shards: {rs0: rsOpts, rs1: rsOpts}});
 
 let recipientShardPrimary = st.rs1.getPrimary();

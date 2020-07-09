@@ -30,7 +30,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/logical_time_validator.h"
-#include "mongo/db/replica_set_aware_service.h"
+#include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/vector_clock_mutable.h"
 
 namespace mongo {
@@ -69,8 +69,8 @@ protected:
     bool _permitRefreshDuringGossipOut() const override;
 
 private:
-    void onStepUpBegin(OperationContext* opCtx) override {}
-    void onStepUpComplete(OperationContext* opCtx) override {}
+    void onStepUpBegin(OperationContext* opCtx, long long term) override {}
+    void onStepUpComplete(OperationContext* opCtx, long long term) override {}
     void onStepDown() override {}
     void onBecomeArbiter() override;
 };
@@ -112,6 +112,7 @@ bool VectorClockMongoD::_gossipOutInternal(OperationContext* opCtx,
     if (serverGlobalParams.clusterRole == ClusterRole::ShardServer ||
         serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
         _gossipOutComponent(opCtx, out, time, Component::ConfigTime);
+        _gossipOutComponent(opCtx, out, time, Component::TopologyTime);
     }
     return wasClusterTimeOutput;
 }
@@ -129,6 +130,7 @@ VectorClock::LogicalTimeArray VectorClockMongoD::_gossipInInternal(OperationCont
     _gossipInComponent(opCtx, in, couldBeUnauthenticated, &newTime, Component::ClusterTime);
     if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
         _gossipInComponent(opCtx, in, couldBeUnauthenticated, &newTime, Component::ConfigTime);
+        _gossipInComponent(opCtx, in, couldBeUnauthenticated, &newTime, Component::TopologyTime);
     }
     return newTime;
 }
@@ -166,15 +168,21 @@ LogicalTime VectorClockMongoD::tick(Component component, uint64_t nTicks) {
 }
 
 void VectorClockMongoD::tickTo(Component component, LogicalTime newTime) {
+    if (component == Component::ClusterTime) {
+        // The ClusterTime is allowed to tickTo in certain very limited and trusted cases (eg.
+        // initializing based on oplog timestamps), so we have to allow it here.
+        _advanceComponentTimeTo(component, std::move(newTime));
+        return;
+    }
+
     if (component == Component::ConfigTime &&
         serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
         _advanceComponentTimeTo(component, std::move(newTime));
         return;
     }
 
-    if (component == Component::ClusterTime) {
-        // The ClusterTime is allowed to tickTo in certain very limited and trusted cases (eg.
-        // initializing based on oplog timestamps), so we have to allow it here.
+    if (component == Component::TopologyTime &&
+        serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
         _advanceComponentTimeTo(component, std::move(newTime));
         return;
     }

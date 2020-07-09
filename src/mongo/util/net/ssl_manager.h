@@ -44,6 +44,7 @@
 #include "mongo/util/decorable.h"
 #include "mongo/util/net/sock.h"
 #include "mongo/util/net/ssl/apple.hpp"
+#include "mongo/util/net/ssl_peer_info.h"
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
@@ -117,26 +118,6 @@ public:
     virtual ~SSLConnectionInterface();
 };
 
-class SSLConfiguration {
-public:
-    bool isClusterMember(StringData subjectName) const;
-    bool isClusterMember(SSLX509Name subjectName) const;
-    void getServerStatusBSON(BSONObjBuilder*) const;
-    Status setServerSubjectName(SSLX509Name name);
-
-    const SSLX509Name& serverSubjectName() const {
-        return _serverSubjectName;
-    }
-
-    SSLX509Name clientSubjectName;
-    Date_t serverCertificateExpirationDate;
-    bool hasCA = false;
-
-private:
-    SSLX509Name _serverSubjectName;
-    std::vector<SSLX509Name::Entry> _canonicalServerSubjectName;
-};
-
 // These represent the ASN.1 type bytes for strings used in an X509 DirectoryString
 constexpr int kASN1BMPString = 30;
 constexpr int kASN1IA5String = 22;
@@ -175,6 +156,26 @@ struct TLSVersionCounts {
     AtomicWord<long long> tls13;
 
     static TLSVersionCounts& get(ServiceContext* serviceContext);
+};
+
+struct CertInformationToLog {
+    SSLX509Name subject;
+    SSLX509Name issuer;
+    std::vector<char> thumbprint;
+    Date_t validityNotBefore;
+    Date_t validityNotAfter;
+};
+
+struct CRLInformationToLog {
+    std::vector<char> thumbprint;
+    Date_t validityNotBefore;
+    Date_t validityNotAfter;
+};
+
+struct SSLInformationToLog {
+    CertInformationToLog server;
+    boost::optional<CertInformationToLog> cluster;
+    boost::optional<CRLInformationToLog> crl;
 };
 
 class SSLManagerInterface : public Decorable<SSLManagerInterface> {
@@ -275,6 +276,12 @@ public:
      * SSL_CTX obect.
      */
     virtual Status stapleOCSPResponse(SSLContextType context) = 0;
+
+    /**
+     * Get information about the certificates and CRL that will be used for outgoing and incoming
+     * SSL connecctions.
+     */
+    virtual SSLInformationToLog getSSLInformationToLog() const = 0;
 };
 
 // Access SSL functions through this instance.

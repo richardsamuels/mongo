@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
 #include "mongo/platform/basic.h"
 
@@ -113,6 +113,7 @@
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/repl/replication_consistency_markers_impl.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_external_state_impl.h"
@@ -122,8 +123,8 @@
 #include "mongo/db/repl/replication_recovery.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/topology_coordinator.h"
+#include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/repl_set_member_in_standalone_mode.h"
-#include "mongo/db/replica_set_aware_service.h"
 #include "mongo/db/s/collection_sharding_state_factory_shard.h"
 #include "mongo/db/s/collection_sharding_state_factory_standalone.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
@@ -135,7 +136,6 @@
 #include "mongo/db/s/sharding_initialization_mongod.h"
 #include "mongo/db/s/sharding_state_recovery.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
-#include "mongo/db/s/wait_for_majority_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_mongod.h"
@@ -155,6 +155,7 @@
 #include "mongo/db/system_index.h"
 #include "mongo/db/transaction_participant.h"
 #include "mongo/db/ttl.h"
+#include "mongo/db/unclean_shutdown.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
@@ -326,7 +327,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     if (kDebugBuild)
-        LOGV2_OPTIONS(20533, {LogComponent::kControl}, "DEBUG build (which is slower)");
+        LOGV2(20533, "DEBUG build (which is slower)");
 
 #if defined(_WIN32)
     VersionInfoInterface::instance().logTargetMinOS();
@@ -432,7 +433,9 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
     startWatchdog(serviceContext);
 
-    if (!storageGlobalParams.readOnly) {
+    // When starting up after an unclean shutdown, we do not attempt to use any of the temporary
+    // files left from the previous run. Thus, we remove them in this case.
+    if (!storageGlobalParams.readOnly && startingAfterUncleanShutdown(serviceContext)) {
         boost::filesystem::remove_all(storageGlobalParams.dbpath + "/_tmp/");
     }
 
@@ -462,6 +465,14 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             "error"_attr = error.toStatus().reason());
         exitCleanly(EXIT_NEED_DOWNGRADE);
     }
+
+    // This flag is used during storage engine initialization to perform behavior that is specific
+    // to recovering from an unclean shutdown. It is also used to determine whether temporary files
+    // should be removed. The last of these uses is done by repairDatabasesAndCheckVersion() above,
+    // so we reset the flag to false here. We reset the flag so that other users of these functions
+    // outside of startup do not perform behavior that is specific to starting up after an unclean
+    // shutdown.
+    startingAfterUncleanShutdown(serviceContext) = false;
 
     auto replProcess = repl::ReplicationProcess::get(serviceContext);
     invariant(replProcess);
@@ -1071,26 +1082,32 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
                 (opCtx->getServiceContext()->getPreciseClockSource()->now() - stepDownStartTime));
     }
 
-    if (auto replCoord = repl::ReplicationCoordinator::get(serviceContext);
-        replCoord && replCoord->enterQuiesceModeIfSecondary()) {
-        ServiceContext::UniqueOperationContext uniqueOpCtx;
-        OperationContext* opCtx = client->getOperationContext();
-        if (!opCtx) {
-            uniqueOpCtx = client->makeOperationContext();
-            opCtx = uniqueOpCtx.get();
-        }
-        if (MONGO_unlikely(hangDuringQuiesceMode.shouldFail())) {
-            LOGV2_OPTIONS(
-                4695101, {LogComponent::kReplication}, "hangDuringQuiesceMode failpoint enabled");
-            hangDuringQuiesceMode.pauseWhileSet(opCtx);
-        }
+    // TODO SERVER-49138: Remove this FCV check once we branch for 4.8.
+    if (serverGlobalParams.featureCompatibility.isVersion(
+            ServerGlobalParams::FeatureCompatibility::Version::kVersion451)) {
+        if (auto replCoord = repl::ReplicationCoordinator::get(serviceContext);
+            replCoord && replCoord->enterQuiesceModeIfSecondary(shutdownTimeout)) {
+            ServiceContext::UniqueOperationContext uniqueOpCtx;
+            OperationContext* opCtx = client->getOperationContext();
+            if (!opCtx) {
+                uniqueOpCtx = client->makeOperationContext();
+                opCtx = uniqueOpCtx.get();
+            }
+            if (MONGO_unlikely(hangDuringQuiesceMode.shouldFail())) {
+                LOGV2_OPTIONS(4695101,
+                              {LogComponent::kReplication},
+                              "hangDuringQuiesceMode failpoint enabled");
+                hangDuringQuiesceMode.pauseWhileSet(opCtx);
+            }
 
-        LOGV2_OPTIONS(4695102,
-                      {LogComponent::kReplication},
-                      "Entering quiesce mode for shutdown",
-                      "quiesceTime"_attr = shutdownTimeout);
-        opCtx->sleepFor(shutdownTimeout);
-        LOGV2_OPTIONS(4695103, {LogComponent::kReplication}, "Exiting quiesce mode for shutdown");
+            LOGV2_OPTIONS(4695102,
+                          {LogComponent::kReplication},
+                          "Entering quiesce mode for shutdown",
+                          "quiesceTime"_attr = shutdownTimeout);
+            opCtx->sleepFor(shutdownTimeout);
+            LOGV2_OPTIONS(
+                4695103, {LogComponent::kReplication}, "Exiting quiesce mode for shutdown");
+        }
     }
 
     LOGV2_OPTIONS(4784901, {LogComponent::kCommand}, "Shutting down the MirrorMaestro");
@@ -1101,16 +1118,8 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 
     // Join the logical session cache before the transport layer.
     if (auto lsc = LogicalSessionCache::get(serviceContext)) {
-        LOGV2_OPTIONS(4784903, {LogComponent::kControl}, "Shutting down the LogicalSessionCache");
+        LOGV2(4784903, "Shutting down the LogicalSessionCache");
         lsc->joinOnShutDown();
-    }
-
-    // Terminate the index consistency check.
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-        LOGV2_OPTIONS(4784904,
-                      {LogComponent::kSharding},
-                      "Shutting down the PeriodicShardedIndexConsistencyChecker");
-        PeriodicShardedIndexConsistencyChecker::get(serviceContext).onShutDown();
     }
 
     // Shutdown the TransportLayer so that new connections aren't accepted
@@ -1157,6 +1166,14 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         LOGV2_OPTIONS(
             4784909, {LogComponent::kReplication}, "Shutting down the ReplicationCoordinator");
         repl::ReplicationCoordinator::get(serviceContext)->shutdown(opCtx);
+
+        // Terminate the index consistency check.
+        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+            LOGV2_OPTIONS(4784904,
+                          {LogComponent::kSharding},
+                          "Shutting down the PeriodicShardedIndexConsistencyChecker");
+            PeriodicShardedIndexConsistencyChecker::get(serviceContext).onShutDown();
+        }
 
         LOGV2_OPTIONS(
             4784910, {LogComponent::kSharding}, "Shutting down the ShardingInitializationMongoD");
@@ -1276,7 +1293,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     }
 #endif
 
-    LOGV2_OPTIONS(4784925, {LogComponent::kControl}, "Shutting down free monitoring");
+    LOGV2(4784925, "Shutting down free monitoring");
     stopFreeMonitoring();
 
     // Shutdown Full-Time Data Capture
@@ -1290,13 +1307,15 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     shutdownTTLMonitor(serviceContext);
 
     // We should always be able to acquire the global lock at shutdown.
+    // An OperationContext is not necessary to call lockGlobal() during shutdown, as it's only used
+    // to check that lockGlobal() is not called after a transaction timestamp has been set.
     //
     // For a Windows service, dbexit does not call exit(), so we must leak the lock outside
     // of this function to prevent any operations from running that need a lock.
     //
     LOGV2(4784929, "Acquiring the global lock for shutdown");
     LockerImpl* globalLocker = new LockerImpl();
-    globalLocker->lockGlobal(MODE_X);
+    globalLocker->lockGlobal(nullptr, MODE_X);
 
     // Global storage engine may not be started in all cases before we exit
     if (serviceContext->getStorageEngine()) {
@@ -1310,7 +1329,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     LOGV2_OPTIONS(4784931, {LogComponent::kDefault}, "Dropping the scope cache for shutdown");
     ScriptEngine::dropScopeCache();
 
-    LOGV2_OPTIONS(20565, {LogComponent::kControl}, "Now exiting");
+    LOGV2(20565, "Now exiting");
 
     audit::logShutdown(client);
 

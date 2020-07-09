@@ -30,6 +30,7 @@
 #include "mongo/client/remote_command_targeter_factory_mock.h"
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/db/catalog_raii.h"
+#include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/catalog_cache_loader_mock.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/collection_sharding_state.h"
@@ -37,13 +38,11 @@
 #include "mongo/db/s/persistent_task_store.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/shard_server_catalog_cache_loader.h"
+#include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/s/sharding_state.h"
-#include "mongo/db/s/wait_for_majority_service.h"
 #include "mongo/s/catalog/sharding_catalog_client_mock.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/database_version_helpers.h"
-#include "mongo/s/shard_server_test_fixture.h"
-#include "mongo/unittest/unittest.h"
 #include "mongo/util/future.h"
 
 namespace mongo {

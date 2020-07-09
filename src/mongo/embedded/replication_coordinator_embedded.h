@@ -49,7 +49,7 @@ public:
 
     void enterTerminalShutdown() override;
 
-    bool enterQuiesceModeIfSecondary() override;
+    bool enterQuiesceModeIfSecondary(Milliseconds quiesceTime) override;
 
     bool inQuiesceMode() const override;
 
@@ -143,6 +143,9 @@ public:
     repl::OpTime getMyLastDurableOpTime() const override;
     repl::OpTimeAndWallTime getMyLastDurableOpTimeAndWallTime() const override;
 
+    Status waitUntilMajorityOpTime(OperationContext* opCtx,
+                                   repl::OpTime targetOpTime,
+                                   boost::optional<Date_t> deadline) override;
     Status waitUntilOpTimeForReadUntil(OperationContext*,
                                        const repl::ReadConcernArgs&,
                                        boost::optional<Date_t>) override;
@@ -215,10 +218,11 @@ public:
 
     void resetLastOpTimesFromOplog(OperationContext*, DataConsistency) override;
 
-    bool shouldChangeSyncSource(const HostAndPort&,
-                                const rpc::ReplSetMetadata&,
-                                const rpc::OplogQueryMetadata&,
-                                const repl::OpTime&) override;
+    repl::ChangeSyncSourceAction shouldChangeSyncSource(const HostAndPort&,
+                                                        const rpc::ReplSetMetadata&,
+                                                        const rpc::OplogQueryMetadata&,
+                                                        const repl::OpTime&,
+                                                        const repl::OpTime&) override;
 
     repl::OpTime getLastCommittedOpTime() const override;
 

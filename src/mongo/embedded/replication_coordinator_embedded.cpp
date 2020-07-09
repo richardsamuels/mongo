@@ -51,7 +51,7 @@ void ReplicationCoordinatorEmbedded::startup(OperationContext* opCtx) {}
 
 void ReplicationCoordinatorEmbedded::enterTerminalShutdown() {}
 
-bool ReplicationCoordinatorEmbedded::enterQuiesceModeIfSecondary() {
+bool ReplicationCoordinatorEmbedded::enterQuiesceModeIfSecondary(Milliseconds quiesceTime) {
     return true;
 }
 
@@ -251,6 +251,12 @@ OpTime ReplicationCoordinatorEmbedded::getMyLastDurableOpTime() const {
     UASSERT_NOT_IMPLEMENTED;
 }
 
+Status ReplicationCoordinatorEmbedded::waitUntilMajorityOpTime(OperationContext* opCtx,
+                                                               repl::OpTime targetOpTime,
+                                                               boost::optional<Date_t> deadline) {
+    UASSERT_NOT_IMPLEMENTED;
+}
+
 Status ReplicationCoordinatorEmbedded::waitUntilOpTimeForRead(OperationContext*,
                                                               const ReadConcernArgs& readConcern) {
     // nothing to wait for
@@ -415,10 +421,12 @@ void ReplicationCoordinatorEmbedded::resetLastOpTimesFromOplog(OperationContext*
     UASSERT_NOT_IMPLEMENTED;
 }
 
-bool ReplicationCoordinatorEmbedded::shouldChangeSyncSource(const HostAndPort&,
-                                                            const rpc::ReplSetMetadata&,
-                                                            const rpc::OplogQueryMetadata&,
-                                                            const OpTime&) {
+ChangeSyncSourceAction ReplicationCoordinatorEmbedded::shouldChangeSyncSource(
+    const HostAndPort&,
+    const rpc::ReplSetMetadata&,
+    const rpc::OplogQueryMetadata&,
+    const OpTime&,
+    const OpTime&) {
     UASSERT_NOT_IMPLEMENTED;
 }
 

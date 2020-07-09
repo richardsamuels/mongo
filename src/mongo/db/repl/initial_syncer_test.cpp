@@ -159,12 +159,13 @@ public:
     void blacklistSyncSource(const HostAndPort& host, Date_t until) override {
         _syncSourceSelector->blacklistSyncSource(host, until);
     }
-    bool shouldChangeSyncSource(const HostAndPort& currentSource,
-                                const rpc::ReplSetMetadata& replMetadata,
-                                const rpc::OplogQueryMetadata& oqMetadata,
-                                const OpTime& lastOpTimeFetched) override {
+    ChangeSyncSourceAction shouldChangeSyncSource(const HostAndPort& currentSource,
+                                                  const rpc::ReplSetMetadata& replMetadata,
+                                                  const rpc::OplogQueryMetadata& oqMetadata,
+                                                  const OpTime& previousOpTimeFetched,
+                                                  const OpTime& lastOpTimeFetched) override {
         return _syncSourceSelector->shouldChangeSyncSource(
-            currentSource, replMetadata, oqMetadata, lastOpTimeFetched);
+            currentSource, replMetadata, oqMetadata, previousOpTimeFetched, lastOpTimeFetched);
     }
 
     void scheduleNetworkResponse(std::string cmdName, const BSONObj& obj) {
@@ -1905,7 +1906,7 @@ TEST_F(InitialSyncerTest,
        InitialSyncerReturnsIncompatibleServerVersionWhenFCVFetcherReturnsUpgradeTargetVersion) {
     auto docs = {BSON("_id" << FeatureCompatibilityVersionParser::kParameterName << "version"
                             << FeatureCompatibilityVersionParser::kVersion44 << "targetVersion"
-                            << FeatureCompatibilityVersionParser::kVersion46)};
+                            << FeatureCompatibilityVersionParser::kVersion451)};
     runInitialSyncWithBadFCVResponse(docs, ErrorCodes::IncompatibleServerVersion);
 }
 

@@ -155,14 +155,14 @@ public:
      * Signals the thread to quit and then waits until it does.
      */
     void shutdown() {
-        LOGV2(36841000, "Shutting down TTL collection monitor thread");
+        LOGV2(3684100, "Shutting down TTL collection monitor thread");
         {
             stdx::lock_guard<Latch> lk(_stateMutex);
             _shuttingDown = true;
             _shuttingDownCV.notify_one();
         }
         wait();
-        LOGV2(36841001, "Finished shutting down TTL collection monitor thread");
+        LOGV2(3684101, "Finished shutting down TTL collection monitor thread");
     }
 
 private:
@@ -380,6 +380,10 @@ private:
 
         try {
             exec->executePlan();
+        } catch (const ExceptionFor<ErrorCodes::QueryPlanKilled>&) {
+            // It is expected that a collection drop can kill a query plan while the TTL monitor is
+            // deleting an old document, so ignore this error.
+            return;
         } catch (const DBException& exception) {
             LOGV2_WARNING(22543,
                           "ttl query execution for index {index} failed with status: {error}",

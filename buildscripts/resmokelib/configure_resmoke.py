@@ -1,18 +1,17 @@
 """Configure the command line input for the resmoke 'run' subcommand."""
 
+import configparser
+import datetime
 import os
 import os.path
+import distutils.spawn
 import sys
-import shlex
-import configparser
+import platform
 
-from typing import NamedTuple
-
-import datetime
 import pymongo.uri_parser
 
-from . import config as _config
-from . import utils
+from buildscripts.resmokelib import config as _config
+from buildscripts.resmokelib import utils
 
 
 def validate_and_update_config(parser, args):
@@ -59,6 +58,23 @@ def _validate_config(parser):
             if version not in set(['old', 'new']):
                 parser.error("Must specify binary versions as 'old' or 'new' in format"
                              " 'version1-version2'")
+
+    if _config.UNDO_RECORDER_PATH is not None:
+        if not sys.platform.startswith('linux') or platform.machine() not in [
+                "i386", "i686", "x86_64"
+        ]:
+            parser.error("--recordWith is only supported on x86 and x86_64 Linux distributions")
+            return
+
+        resolved_path = distutils.spawn.find_executable(_config.UNDO_RECORDER_PATH)
+        if resolved_path is None:
+            parser.error(
+                f"Cannot find the UndoDB live-record binary '{_config.UNDO_RECORDER_PATH}'. Check that it exists and is executable"
+            )
+            return
+
+        if not os.access(resolved_path, os.X_OK):
+            parser.error(f"Found '{resolved_path}', but it is not an executable file")
 
 
 def _update_config_vars(values):  # pylint: disable=too-many-statements,too-many-locals,too-many-branches

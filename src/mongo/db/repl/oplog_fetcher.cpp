@@ -55,6 +55,7 @@ MONGO_FAIL_POINT_DEFINE(hangAfterOplogFetcherCallbackScheduled);
 MONGO_FAIL_POINT_DEFINE(hangBeforeStartingOplogFetcher);
 MONGO_FAIL_POINT_DEFINE(hangBeforeOplogFetcherRetries);
 MONGO_FAIL_POINT_DEFINE(hangBeforeProcessingSuccessfulBatch);
+MONGO_FAIL_POINT_DEFINE(hangOplogFetcherBeforeAdvancingLastFetched);
 
 namespace {
 class OplogBatchStats {
@@ -307,8 +308,7 @@ Milliseconds OplogFetcher::_getRetriedFindMaxTime() const {
 
 void OplogFetcher::_finishCallback(Status status) {
     invariant(isActive());
-
-    _onShutdownCallbackFn(status);
+    _onShutdownCallbackFn(status, _requiredRBID);
 
     decltype(_onShutdownCallbackFn) onShutdownCallbackFn;
     decltype(_oplogFetcherRestartDecision) oplogFetcherRestartDecision;
@@ -680,14 +680,16 @@ Status OplogFetcher::_onSuccessfulBatch(const Documents& documents) {
     }
 
     // This lastFetched value is the last OpTime from the previous batch.
-    auto lastFetched = _getLastOpTimeFetched();
+    auto previousOpTimeFetched = _getLastOpTimeFetched();
 
     auto validateResult = OplogFetcher::validateDocuments(
-        documents, _firstBatch, lastFetched.getTimestamp(), _startingPoint);
+        documents, _firstBatch, previousOpTimeFetched.getTimestamp(), _startingPoint);
     if (!validateResult.isOK()) {
         return validateResult.getStatus();
     }
     auto info = validateResult.getValue();
+    // If the batch is empty, set 'lastDocOpTime' to the lastFetched from the previous batch.
+    auto lastDocOpTime = info.lastDocument.isNull() ? previousOpTimeFetched : info.lastDocument;
 
     // Process replset metadata.  It is important that this happen after we've validated the
     // first batch, so we don't progress our knowledge of the commit point from a
@@ -704,6 +706,24 @@ Status OplogFetcher::_onSuccessfulBatch(const Documents& documents) {
         return metadataResult.getStatus();
     }
     auto replSetMetadata = metadataResult.getValue();
+
+    // Determine if we should stop syncing from our current sync source.
+    auto changeSyncSourceAction = _dataReplicatorExternalState->shouldStopFetching(
+        _source, replSetMetadata, oqMetadata, previousOpTimeFetched, lastDocOpTime);
+    str::stream errMsg;
+    errMsg << "sync source " << _source.toString();
+    errMsg << " (config version: " << replSetMetadata.getConfigVersion();
+    errMsg << "; last applied optime: " << oqMetadata.getLastOpApplied().toString();
+    errMsg << "; sync source index: " << oqMetadata.getSyncSourceIndex();
+    errMsg << "; has primary index: " << oqMetadata.hasPrimaryIndex();
+    errMsg << ") is no longer valid";
+    errMsg << " previous batch last fetched optime: " << previousOpTimeFetched.toString();
+    errMsg << " current batch last fetched optime: " << lastDocOpTime.toString();
+
+    if (changeSyncSourceAction == ChangeSyncSourceAction::kStopSyncingAndDropLastBatch) {
+        return Status(ErrorCodes::InvalidSyncSource, errMsg);
+    }
+
     _dataReplicatorExternalState->processMetadata(replSetMetadata, oqMetadata);
 
     // Increment stats. We read all of the docs in the query.
@@ -717,18 +737,21 @@ Status OplogFetcher::_onSuccessfulBatch(const Documents& documents) {
         return status;
     }
 
+    if (changeSyncSourceAction == ChangeSyncSourceAction::kStopSyncingAndEnqueueLastBatch) {
+        return Status(ErrorCodes::InvalidSyncSource, errMsg);
+    }
+
+    if (MONGO_unlikely(hangOplogFetcherBeforeAdvancingLastFetched.shouldFail())) {
+        hangOplogFetcherBeforeAdvancingLastFetched.pauseWhileSet();
+    }
+
     // Start skipping the first doc after at least one doc has been enqueued in the lifetime
     // of this fetcher.
     _startingPoint = StartingPoint::kSkipFirstDoc;
 
-    // We have now processed the batch and should move forward our view of _lastFetched.
-    if (documents.size() > 0) {
-        auto lastDocOpTimeRes = OpTime::parseFromOplogEntry(documents.back());
-        if (!lastDocOpTimeRes.isOK()) {
-            return lastDocOpTimeRes.getStatus();
-        }
-
-        auto lastDocOpTime = lastDocOpTimeRes.getValue();
+    // We have now processed the batch. We should only move forward our view of _lastFetched if the
+    // batch was not empty.
+    if (lastDocOpTime != previousOpTimeFetched) {
         LOGV2_DEBUG(21273,
                     3,
                     "Oplog fetcher setting last fetched optime ahead after batch: {lastDocOpTime}",
@@ -737,22 +760,6 @@ Status OplogFetcher::_onSuccessfulBatch(const Documents& documents) {
 
         stdx::lock_guard<Latch> lock(_mutex);
         _lastFetched = lastDocOpTime;
-    }
-
-    // Get the last fetched optime from the most recent batch.
-    lastFetched = _getLastOpTimeFetched();
-
-    if (_dataReplicatorExternalState->shouldStopFetching(
-            _source, replSetMetadata, oqMetadata, lastFetched)) {
-        str::stream errMsg;
-        errMsg << "sync source " << _source.toString();
-        errMsg << " (config version: " << replSetMetadata.getConfigVersion();
-        errMsg << "; last applied optime: " << oqMetadata.getLastOpApplied().toString();
-        errMsg << "; sync source index: " << oqMetadata.getSyncSourceIndex();
-        errMsg << "; has primary index: " << oqMetadata.hasPrimaryIndex();
-        errMsg << ") is no longer valid";
-        errMsg << "last fetched optime: " << lastFetched.toString();
-        return Status(ErrorCodes::InvalidSyncSource, errMsg);
     }
 
     _firstBatch = false;
@@ -764,15 +771,19 @@ Status OplogFetcher::_checkRemoteOplogStart(const OplogFetcher::Documents& docum
                                             int remoteRBID) {
     using namespace fmt::literals;
 
-    // Once we establish our cursor, we need to ensure that our upstream node hasn't rolled back
-    // since that could cause it to not have our required minValid point. The cursor will be
-    // killed if the upstream node rolls back so we don't need to keep checking once the cursor
-    // is established.
-    if (remoteRBID != _requiredRBID) {
+    // Once we establish our cursor, if we use rollback-via-refetch, we need to ensure that our
+    // upstream node hasn't rolled back since that could cause it to not have our required minValid
+    // point. The cursor will be killed if the upstream node rolls back so we don't need to keep
+    // checking once the cursor is established. If we do not use rollback-via-refetch, this check is
+    // not necessary, and _requiredRBID will be set to kUninitializedRollbackId in that case.
+    if (_requiredRBID != ReplicationProcess::kUninitializedRollbackId &&
+        remoteRBID != _requiredRBID) {
         return Status(ErrorCodes::InvalidSyncSource,
                       "Upstream node rolled back after choosing it as a sync source. Choosing "
                       "new sync source.");
     }
+    // Set _requiredRBID to remoteRBID so that it can be returned when the oplog fetcher shuts down.
+    _requiredRBID = remoteRBID;
 
     // Sometimes our remoteLastOpApplied may be stale; if we received a document with an
     // opTime later than remoteLastApplied, we can assume the remote is at least up to that
@@ -897,6 +908,14 @@ Status OplogFetcher::_checkTooStaleToSyncFromSource(const OpTime lastFetched,
 
 bool OplogFetcher::OplogFetcherRestartDecisionDefault::shouldContinue(OplogFetcher* fetcher,
                                                                       Status status) {
+    // If we try to sync from a node that is shutting down, do not attempt to reconnect.
+    // We should choose a new sync source.
+    if (status.code() == ErrorCodes::ShutdownInProgress) {
+        LOGV2(4696202,
+              "Not recreating cursor for oplog fetcher because sync source is shutting down",
+              "error"_attr = redact(status));
+        return false;
+    }
     if (_numRestarts == _maxRestarts) {
         LOGV2(21274,
               "Error returned from oplog query (no more query restarts left): {error}",

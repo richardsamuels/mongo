@@ -72,7 +72,7 @@ void FeatureCompatibilityVersion::setTargetUpgrade(OperationContext* opCtx) {
         updateMods.append(FeatureCompatibilityVersionParser::kVersionField,
                           FeatureCompatibilityVersionParser::kVersion44);
         updateMods.append(FeatureCompatibilityVersionParser::kTargetVersionField,
-                          FeatureCompatibilityVersionParser::kVersion46);
+                          FeatureCompatibilityVersionParser::kVersion451);
     });
 }
 
@@ -125,7 +125,7 @@ void FeatureCompatibilityVersion::setIfCleanStartup(OperationContext* opCtx,
         repl::TimestampedBSONObj{
             BSON("_id" << FeatureCompatibilityVersionParser::kParameterName
                        << FeatureCompatibilityVersionParser::kVersionField
-                       << (storeUpgradeVersion ? FeatureCompatibilityVersionParser::kVersion46
+                       << (storeUpgradeVersion ? FeatureCompatibilityVersionParser::kVersion451
                                                : FeatureCompatibilityVersionParser::kVersion44)),
             Timestamp()},
         repl::OpTime::kUninitializedTerm));  // No timestamp or term because this write is not
@@ -175,13 +175,13 @@ void FeatureCompatibilityVersion::updateMinWireVersion() {
     WireSpec& spec = WireSpec::instance();
 
     switch (serverGlobalParams.featureCompatibility.getVersion()) {
-        case ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo46:
-        case ServerGlobalParams::FeatureCompatibility::Version::kUpgradingTo46:
-        case ServerGlobalParams::FeatureCompatibility::Version::kDowngradingTo44:
+        case ServerGlobalParams::FeatureCompatibility::kLatest:
+        case ServerGlobalParams::FeatureCompatibility::Version::kUpgradingFrom44To451:
+        case ServerGlobalParams::FeatureCompatibility::Version::kDowngradingFrom451To44:
             spec.incomingInternalClient.minWireVersion = LATEST_WIRE_VERSION;
             spec.outgoing.minWireVersion = LATEST_WIRE_VERSION;
             return;
-        case ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo44:
+        case ServerGlobalParams::FeatureCompatibility::kLastLTS:
             spec.incomingInternalClient.minWireVersion = LATEST_WIRE_VERSION - 1;
             spec.outgoing.minWireVersion = LATEST_WIRE_VERSION - 1;
             return;
@@ -196,7 +196,7 @@ void FeatureCompatibilityVersion::_setVersion(
     serverGlobalParams.featureCompatibility.setVersion(newVersion);
     updateMinWireVersion();
 
-    if (newVersion != ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo44) {
+    if (newVersion != ServerGlobalParams::FeatureCompatibility::kLastLTS) {
         // Close all incoming connections from internal clients with binary versions lower than
         // ours.
         opCtx->getServiceContext()->getServiceEntryPoint()->endAllSessions(
@@ -207,7 +207,7 @@ void FeatureCompatibilityVersion::_setVersion(
             .dropConnections(transport::Session::kKeepOpen);
     }
 
-    if (newVersion != ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo46) {
+    if (newVersion != ServerGlobalParams::FeatureCompatibility::kLatest) {
         if (MONGO_unlikely(hangBeforeAbortingRunningTransactionsOnFCVDowngrade.shouldFail())) {
             LOGV2(20460,
                   "FeatureCompatibilityVersion - "
@@ -228,8 +228,8 @@ void FeatureCompatibilityVersion::_setVersion(
     // 1. Setting featureCompatibilityVersion from downgrading to fullyDowngraded.
     // 2. Setting featureCompatibilityVersion from fullyDowngraded to upgrading.
     const auto shouldIncrementTopologyVersion =
-        newVersion == ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo44 ||
-        newVersion == ServerGlobalParams::FeatureCompatibility::Version::kUpgradingTo46;
+        newVersion == ServerGlobalParams::FeatureCompatibility::kLastLTS ||
+        newVersion == ServerGlobalParams::FeatureCompatibility::Version::kUpgradingFrom44To451;
     if (isReplSet && shouldIncrementTopologyVersion) {
         replCoordinator->incrementTopologyVersion();
     }
@@ -257,10 +257,10 @@ void FeatureCompatibilityVersion::onReplicationRollback(OperationContext* opCtx)
 void FeatureCompatibilityVersion::_validateVersion(StringData version) {
     uassert(40284,
             str::stream() << "featureCompatibilityVersion must be '"
-                          << FeatureCompatibilityVersionParser::kVersion46 << "' or '"
+                          << FeatureCompatibilityVersionParser::kVersion451 << "' or '"
                           << FeatureCompatibilityVersionParser::kVersion44 << "'. See "
                           << feature_compatibility_version_documentation::kCompatibilityLink << ".",
-            version == FeatureCompatibilityVersionParser::kVersion46 ||
+            version == FeatureCompatibilityVersionParser::kVersion451 ||
                 version == FeatureCompatibilityVersionParser::kVersion44);
 }
 
@@ -317,28 +317,28 @@ void FeatureCompatibilityVersionParameter::append(OperationContext* opCtx,
 
     BSONObjBuilder featureCompatibilityVersionBuilder(b.subobjStart(name));
     switch (serverGlobalParams.featureCompatibility.getVersion()) {
-        case ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo46:
+        case ServerGlobalParams::FeatureCompatibility::kLatest:
             featureCompatibilityVersionBuilder.append(
                 FeatureCompatibilityVersionParser::kVersionField,
-                FeatureCompatibilityVersionParser::kVersion46);
+                FeatureCompatibilityVersionParser::kVersion451);
             return;
-        case ServerGlobalParams::FeatureCompatibility::Version::kUpgradingTo46:
-            featureCompatibilityVersionBuilder.append(
-                FeatureCompatibilityVersionParser::kVersionField,
-                FeatureCompatibilityVersionParser::kVersion44);
-            featureCompatibilityVersionBuilder.append(
-                FeatureCompatibilityVersionParser::kTargetVersionField,
-                FeatureCompatibilityVersionParser::kVersion46);
-            return;
-        case ServerGlobalParams::FeatureCompatibility::Version::kDowngradingTo44:
+        case ServerGlobalParams::FeatureCompatibility::Version::kUpgradingFrom44To451:
             featureCompatibilityVersionBuilder.append(
                 FeatureCompatibilityVersionParser::kVersionField,
                 FeatureCompatibilityVersionParser::kVersion44);
             featureCompatibilityVersionBuilder.append(
                 FeatureCompatibilityVersionParser::kTargetVersionField,
+                FeatureCompatibilityVersionParser::kVersion451);
+            return;
+        case ServerGlobalParams::FeatureCompatibility::Version::kDowngradingFrom451To44:
+            featureCompatibilityVersionBuilder.append(
+                FeatureCompatibilityVersionParser::kVersionField,
+                FeatureCompatibilityVersionParser::kVersion44);
+            featureCompatibilityVersionBuilder.append(
+                FeatureCompatibilityVersionParser::kTargetVersionField,
                 FeatureCompatibilityVersionParser::kVersion44);
             return;
-        case ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo44:
+        case ServerGlobalParams::FeatureCompatibility::kLastLTS:
             featureCompatibilityVersionBuilder.append(
                 FeatureCompatibilityVersionParser::kVersionField,
                 FeatureCompatibilityVersionParser::kVersion44);

@@ -11,10 +11,10 @@ import pymongo.errors
 
 from buildscripts.resmokelib import errors
 from buildscripts.resmokelib import utils
-from buildscripts.resmokelib.testing.hooks import interface
+from buildscripts.resmokelib.testing.fixtures import interface as fixture_interface
 from buildscripts.resmokelib.testing.fixtures import replicaset
 from buildscripts.resmokelib.testing.fixtures import shardedcluster
-from buildscripts.resmokelib.testing.fixtures import interface as fixture_interface
+from buildscripts.resmokelib.testing.hooks import interface
 
 
 class ContinuousStepdown(interface.Hook):  # pylint: disable=too-many-instance-attributes
@@ -473,7 +473,7 @@ class _StepdownThread(threading.Thread):  # pylint: disable=too-many-instance-at
         for rs_fixture in self._rs_fixtures:
             self._step_down(rs_fixture)
 
-    # pylint: disable=R0912,R0915
+    # pylint: disable=R0912,R0914,R0915
     def _step_down(self, rs_fixture):
         try:
             primary = rs_fixture.get_primary(timeout_secs=self._stepdown_interval_secs)

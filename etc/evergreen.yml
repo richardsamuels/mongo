@@ -765,7 +765,7 @@ functions:
         cat <<EOF > notary_env.sh
         export NOTARY_TOKEN=${signing_auth_token_46}
         export BARQUE_USERNAME=${barque_user}
-        export BARQUE_PASSWORD=${barque_password}
+        export BARQUE_API_KEY=${barque_api_key}
         EOF
 
         echo "${signing_auth_token_46}" > signing_auth_token
@@ -1557,7 +1557,7 @@ functions:
           else
 
             ${activate_virtualenv}
-            PATH=$PATH:$HOME $python buildscripts/selected_tests.py --expansion-file expansions.yml --verbose --selected-tests-config .selected_tests.yml
+            PATH=$PATH:$HOME $python buildscripts/selected_tests.py --expansion-file expansions.yml --selected-tests-config .selected_tests.yml
 
           fi
     - command: archive.targz_pack
@@ -1822,15 +1822,14 @@ functions:
         fi
         rm -rf ${install_directory|/data/mongo-install-directory}
 
-        # Only allow hygienic builds in Evergreen, and use hardlinks to
-        # reduce the disk space impact of installing all of the binaries and
-        # associated debug info.
+        # Use hardlinks to reduce the disk space impact of installing
+        # all of the binaries and associated debug info.
 
         # The expansion here is a workaround to let us set a different install-action
         # for tasks that don't support the one we set here. A better plan would be
         # to support install-action for Ninja builds directly.
         # TODO: https://jira.mongodb.org/browse/SERVER-48203
-        extra_args="--install-mode=hygienic --install-action=${task_install_action|hardlink}"
+        extra_args="--install-action=${task_install_action|hardlink}"
 
         # By default, limit link jobs to one quarter of our overall -j
         # concurrency unless locally overridden. We do this because in
@@ -1988,7 +1987,6 @@ functions:
           commit=$(git show -s --pretty=format:"%h - %an, %ar: %s")
           echo "Git branch: $branch, commit: $commit"
 
-          sudo apt-get install leiningen
           lein install
     - command: shell.exec
       params:
@@ -2388,6 +2386,11 @@ functions:
         ignore_missing_file: true
         file: src/ec2_artifacts.yml
 
+    - command: expansions.write
+      params:
+        ignore_missing_file: true
+        file: src/expansions.yml
+
     - command: shell.exec
       type: test
       params:
@@ -2570,22 +2573,8 @@ functions:
             echo "Cannot determine the IP address for the remote monitor."
             continue
           fi
-          cmd="${tar|tar} czf ec2_monitor_files.tgz ${ec2_monitor_files}"
-          ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-          ssh_connection_options="$ssh_connection_options -o ConnectionAttempts=3"
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@$private_ip_address             \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
-            --commands "$cmd"
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@$private_ip_address             \
-            --operation "copy_from"                          \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
-            --file ec2_monitor_files.tgz
+
+          $python buildscripts/powercycle_operations.py copyEC2MonitorFiles
           sleep 30
         done
 
@@ -2636,332 +2625,20 @@ functions:
       params:
         file: src/${aws_ec2_yml}
 
-    - command: shell.exec
+    - command: expansions.write
       params:
-        shell: bash
-        working_dir: src
-        script: |
-          set -o errexit
-          # Copy mount_drives.sh script to remote host.
-          ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-          ${activate_virtualenv}
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@${private_ip_address}           \
-            --operation "copy_to"                            \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
-            --file buildscripts/mount_drives.sh
+        file: src/expansions.yml
 
     - command: shell.exec
       params:
         shell: bash
         working_dir: src
         script: |
+          set -o verbose
           set -o errexit
-          # Mount /data on the attached drive(s), more than 1 indicates a RAID set.
-          ${set_sudo}
-          script_opts="-d '${data_device_names}'"
-          if [ ! -z "${raid_data_device_name}" ]; then
-            script_opts="$script_opts -r ${raid_data_device_name}"
-          fi
-          if [ ! -z "${fstype}" ]; then
-            script_opts="$script_opts -t ${fstype}"
-          fi
-          if [ ! -z "${fs_options}" ]; then
-            script_opts="$script_opts -o '${fs_options}'"
-          fi
-          # Mount /log on the attached drive.
-          if [ ! -z "${log_device_name}" ]; then
-            script_opts="$script_opts -l '${log_device_name}'"
-            log="/log"
-          fi
-          group=$(id -Gn $USER | cut -f1 -d ' ') || true
-          user_group="$USER:$group"
-          script_opts="$script_opts -u $user_group"
-          data_db=/data/db
-          cmds="$sudo bash mount_drives.sh $script_opts; mount; ls -ld $data_db $log; df"
-          ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-          ${activate_virtualenv}
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@${private_ip_address}           \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
-            --commands "$cmds"
 
-    - command: shell.exec
-      params:
-        shell: bash
-        working_dir: src
-        script: |
-          set -o errexit
-          # Create remote_dir, if specified as expansion macro and is not '.' (pwd).
-          if [[ -z "${remote_dir|}" || ${remote_dir} == "." ]]; then
-            exit 0
-          fi
-          ${set_sudo}
-          ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-          group=$(id -Gn $USER | cut -f1 -d ' ') || true
-          user_group="$USER:$group"
-          set_permission="chmod 777 ${remote_dir}"
-          if [ "Windows_NT" = "$OS" ]; then
-            set_permission="setfacl -s user::rwx,group::rwx,other::rwx ${remote_dir}"
-          fi
-          cmds="$sudo mkdir -p ${remote_dir}; $sudo chown $user_group ${remote_dir}; $set_permission; ls -ld ${remote_dir}"
           ${activate_virtualenv}
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@${private_ip_address}           \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
-            --commands "$cmds"
-
-    - command: shell.exec
-      params:
-        shell: bash
-        working_dir: src
-        script: |
-          set -o errexit
-          # Copy buildscripts, pytests and mongoDB executables to the remote host.
-          file_param="--file etc --file buildscripts --file pytests"
-          mongo_executables="mongo mongod mongos"
-          for executable in $mongo_executables
-          do
-            file_param="$file_param --file dist-test/bin/$executable${exe}"
-          done
-          ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-          ${activate_virtualenv}
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@${private_ip_address}           \
-            --operation "copy_to"                            \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
-            $file_param                                      \
-            --remoteDir ${remote_dir}
-
-    - command: shell.exec
-      params:
-        shell: bash
-        working_dir: src
-        script: |
-          set -o errexit
-          # Set up virtualenv on remote.
-          cmds="python_loc=\$(which \${python|/opt/mongodbtoolchain/v3/bin/python3})"
-          cmds="$cmds; remote_dir=${remote_dir|.}"
-          cmds="$cmds; if [ \"Windows_NT\" = \"$OS\" ]; then python_loc=\$(cygpath -w \$python_loc); remote_dir=\$(cygpath -w \$remote_dir); fi"
-          cmds="$cmds; virtualenv --python \$python_loc --system-site-packages ${virtualenv_dir|venv}"
-          cmds="$cmds; activate=\$(find ${virtualenv_dir|venv} -name 'activate')"
-          cmds="$cmds; . \$activate"
-          cmds="$cmds; pip3 install -r \$remote_dir/etc/pip/powercycle-requirements.txt"
-          ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-          ${activate_virtualenv}
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@${private_ip_address}           \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
-            --commands "$cmds"
-
-    - command: shell.exec
-      params:
-        shell: bash
-        working_dir: src
-        script: |
-          if [ "Windows_NT" = "$OS" ]; then
-            exit 0
-          fi
-          # Enable core dumps on non-Windows remote hosts.
-          # The core pattern must specify a director, since mongod --fork will chdir("/")
-          # and cannot generate a core dump there (see SERVER-21635).
-          # We need to reboot the host for the core limits to take effect.
-          ${set_sudo}
-          core_pattern=${remote_dir}/dump_%e.%p.core
-          sysctl_conf=/etc/sysctl.conf
-          cmds="ulimit -a"
-          cmds="$cmds; echo \"$USER - core unlimited\" | $sudo tee -a /etc/security/limits.conf"
-          cmds="$cmds; if [ -f $sysctl_conf ]"
-          cmds="$cmds; then grep ^kernel.core_pattern $sysctl_conf"
-          cmds="$cmds;    if [ \$? -eq  0 ]"
-          cmds="$cmds;    then $sudo sed -i \"s,kernel.core_pattern=.*,kernel.core_pattern=$core_pattern,\" $sysctl_conf"
-          cmds="$cmds;    else echo \"kernel.core_pattern=$core_pattern\" | $sudo tee -a $sysctl_conf"
-          cmds="$cmds;    fi"
-          cmds="$cmds; else echo Cannot change the core pattern and no core dumps will be generated."
-          cmds="$cmds; fi"
-          # The following line for restarting the machine is based on
-          # https://unix.stackexchange.com/a/349558 in order to ensure the ssh client gets a
-          # response from the remote machine before it restarts.
-          cmds="$cmds; nohup $sudo reboot &>/dev/null & exit"
-          ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-          ${activate_virtualenv}
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@${private_ip_address}           \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
-            --commands "$cmds"
-
-    - command: shell.exec
-      params:
-        shell: bash
-        working_dir: src
-        script: |
-          if [ "Windows_NT" = "$OS" ]; then
-            exit 0
-          fi
-          # Always exit successfully, as this is just informational.
-          trap 'echo "Trapped exit code $?, exiting with 0"; exit 0' EXIT
-          # Print the ulimit & kernel.core_pattern
-          cmds="uptime"
-          cmds="$cmds; ulimit -a"
-          cmds="$cmds; if [ -f /sbin/sysctl ]"
-          cmds="$cmds; then /sbin/sysctl kernel.core_pattern"
-          cmds="$cmds; fi"
-          ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-          ${activate_virtualenv}
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@${private_ip_address}           \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|3}                       \
-            --commands "$cmds"
-
-    - command: shell.exec
-      params:
-        shell: bash
-        working_dir: src
-        script: |
-          set -o errexit
-          ${set_sudo}
-          # Set up curator to collect system & process stats on remote.
-          if [ "Windows_NT" = "$OS" ]; then
-             variant=windows
-          else
-             variant=ubuntu1604
-          fi
-          # Download stable version of curator
-          curator_hash=117d1a65256ff78b6d15ab79a1c7088443b936d0
-          curator_url="https://s3.amazonaws.com/boxes.10gen.com/build/curator/curator-dist-$variant-$curator_hash.tar.gz"
-          cmds="curl -s $curator_url | tar -xzv"
-          if [ "Windows_NT" = "$OS" ]; then
-            # Since curator runs as SYSTEM user, ensure the output files can be accessed.
-            cmds="$cmds; touch ${monitor_system_file}; chmod 777 ${monitor_system_file}"
-            cmds="$cmds; cygrunsrv --install curator_sys --path curator --chdir \$HOME --args 'stat system --file ${monitor_system_file}'"
-            cmds="$cmds; touch ${monitor_proc_file}; chmod 777 ${monitor_proc_file}"
-            cmds="$cmds; cygrunsrv --install curator_proc --path curator --chdir \$HOME --args 'stat process-all --file ${monitor_proc_file}'"
-            cmds="$cmds; cygrunsrv --start curator_sys"
-            cmds="$cmds; cygrunsrv --start curator_proc"
-          else
-            cmds="$cmds; cmd=\"@reboot cd \$HOME && $sudo ./curator stat system >> ${monitor_system_file}\""
-            cmds="$cmds; (crontab -l ; echo \"\$cmd\") | crontab -"
-            cmds="$cmds; cmd=\"@reboot cd \$HOME && $sudo ./curator stat process-all >> ${monitor_proc_file}\""
-            cmds="$cmds; (crontab -l ; echo \"\$cmd\") | crontab -"
-            cmds="$cmds; crontab -l"
-            cmds="$cmds; { $sudo \$HOME/curator stat system --file ${monitor_system_file} > /dev/null 2>&1 & $sudo \$HOME/curator stat process-all --file ${monitor_proc_file} > /dev/null 2>&1 & } & disown"
-          fi
-          ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-          ${activate_virtualenv}
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@${private_ip_address}           \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
-            --commands "$cmds"
-
-    - command: shell.exec
-      params:
-        shell: bash
-        working_dir: src
-        script: |
-          set -o errexit
-          ${set_sudo}
-          # Many systems have the firewall disabled, by default. In case the firewall is
-          # enabled we add rules for the mongod ports on the remote.
-          # RHEL 7 firewall rules
-          if [ ! -z "$(which firewall-cmd 2> /dev/null)" ]; then
-            cmds="$sudo firewall-cmd --permanent --zone=public --add-port=ssh/tcp"
-            cmds="$cmds; $sudo firewall-cmd --permanent --zone=public --add-port=${standard_port}/tcp"
-            cmds="$cmds; $sudo firewall-cmd --permanent --zone=public --add-port=${secret_port}/tcp"
-            cmds="$cmds; $sudo firewall-cmd --reload"
-            cmds="$cmds; $sudo firewall-cmd --list-all"
-          # ArchLinux, Debian, RHEL 6 firewall rules
-          elif [ ! -z "$($sudo iptables --list 2> /dev/null)" ]; then
-            cmds="$sudo iptables -I INPUT 1 -p tcp --dport ssh -j ACCEPT"
-            cmds="$cmds; $sudo iptables -I INPUT 1 -p tcp --dport ${standard_port} -j ACCEPT"
-            cmds="$cmds; $sudo iptables -I INPUT 1 -p tcp --dport ${secret_port} -j ACCEPT"
-            if [ -d /etc/iptables ]; then
-              rules_file=/etc/iptables/iptables.rules
-            elif [ -f /etc/sysconfig/iptables ]; then
-              rules_file=/etc/sysconfig/iptables
-            else
-              rules_file=/etc/iptables.up.rules
-            fi
-            cmds="$cmds; $sudo iptables-save | $sudo tee $rules_file"
-            cmds="$cmds; $sudo iptables --list-rules"
-          elif [ ! -z "$($sudo service iptables status 2> /dev/null)" ]; then
-            cmds="$sudo iptables -I INPUT 1 -p tcp --dport ssh -j ACCEPT"
-            cmds="$cmds; $sudo iptables -I INPUT 1 -p tcp --dport ${standard_port} -j ACCEPT"
-            cmds="$cmds; $sudo iptables -I INPUT 1 -p tcp --dport ${secret_port} -j ACCEPT"
-            cmds="$cmds; $sudo service iptables save"
-            cmds="$cmds; $sudo service iptables status"
-          # Ubuntu firewall rules
-          elif [ ! -z "$($sudo ufw status 2> /dev/null)" ]; then
-            cmds="$sudo ufw allow ssh/tcp"
-            cmds="$cmds; $sudo ufw allow ${standard_port}/tcp"
-            cmds="$cmds; $sudo ufw allow ${secret_port}/tcp"
-            cmds="$cmds; $sudo ufw reload"
-            cmds="$cmds; $sudo ufw status"
-          # SuSE firewall rules
-          # TODO: Add firewall rules using SuSEfirewall2
-          elif [ ! -z "$($sudo /sbin/SuSEfirewall2 help 2> /dev/null)" ]; then
-            cmds="$sudo /sbin/SuSEfirewall2 stop"
-            cmds="$cmds; $sudo /sbin/SuSEfirewall2 off"
-          # Windows firewall rules
-          elif [ ! -z "$(netsh advfirewall show store 2> /dev/null)" ]; then
-            add_rule="netsh advfirewall firewall add rule"
-            cmds="$add_rule name='MongoDB port ${standard_port} in' dir=in action=allow protocol=TCP localport=${standard_port}"
-            cmds="$cmds; $add_rule name='MongoDB port ${standard_port} out' dir=in action=allow protocol=TCP localport=${standard_port}"
-            cmds="$cmds; $add_rule name='MongoDB port ${secret_port} in' dir=in action=allow protocol=TCP localport=${secret_port}"
-            cmds="$cmds; $add_rule name='MongoDB port ${secret_port} out' dir=in action=allow protocol=TCP localport=${secret_port}"
-            cmds="$cmds; netsh advfirewall firewall show rule name=all | grep -A 13 'MongoDB'"
-          else
-            echo "Firewall not active or unknown firewall command on this platform"
-            exit 0
-          fi
-          set -o errexit
-          if [ ! -z "$cmds" ]; then
-            ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-            ${activate_virtualenv}
-            $python buildscripts/remote_operations.py          \
-              --verbose                                        \
-              --userHost $USER@${private_ip_address}           \
-              --sshConnectionOptions "$ssh_connection_options" \
-              --retries ${ssh_retries|0}                       \
-              --commands "$cmds"
-          fi
-
-    - command: shell.exec
-      params:
-        shell: bash
-        working_dir: src
-        script: |
-          set -o errexit
-          if [[ "Windows_NT" != "$OS" || -z "${windows_crash_zip}" ]]; then
-            exit 0
-          fi
-          # Install NotMyFault, used to crash Windows.
-          cmds="curl -s -o ${windows_crash_zip} ${windows_crash_dl}"
-          cmds="$cmds; unzip -q ${windows_crash_zip} -d ${windows_crash_dir}"
-          cmds="$cmds; chmod +x ${windows_crash_dir}/*.exe"
-          ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-          ${activate_virtualenv}
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@${private_ip_address}           \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
-            --commands "$cmds"
+          $python buildscripts/powercycle_operations.py setUpEC2Instance
 
     - *copy_ec2_monitor_files
 
@@ -3002,19 +2679,9 @@ functions:
       shell: bash
       working_dir: src
       script: |
-        # Tar/zip artifacts on remote host.
-        if [[ -z "${ec2_artifacts}" || -n "${ec2_ssh_failure}" ]]; then
-          exit 0
-        fi
-        cmd="${tar|tar} czf ec2_artifacts.tgz ${ec2_artifacts}"
-        ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-        ${activate_virtualenv}
-        $python buildscripts/remote_operations.py          \
-          --verbose                                        \
-          --userHost $USER@${private_ip_address}           \
-          --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries|0}                       \
-          --commands "$cmd"
+       set -o verbose
+       ${activate_virtualenv}
+        $python buildscripts/powercycle_operations.py tarEC2Artifacts
 
   "copy EC2 artifacts": &copy_ec2_artifacts
     command: shell.exec
@@ -3022,19 +2689,8 @@ functions:
       shell: bash
       working_dir: src
       script: |
-        # Copy remote artifacts.
-        if [[ -z "${ec2_artifacts}" || -n "${ec2_ssh_failure}" ]]; then
-          exit 0
-        fi
-        ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
         ${activate_virtualenv}
-        $python buildscripts/remote_operations.py          \
-          --verbose                                        \
-          --userHost $USER@${private_ip_address}           \
-          --operation "copy_from"                          \
-          --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries|0}                       \
-          --file ec2_artifacts.tgz
+        $python buildscripts/powercycle_operations.py copyEC2Artifacts
 
   "cleanup EC2 instance": &cleanup_ec2_instance
     command: shell.exec
@@ -3062,23 +2718,8 @@ functions:
       shell: bash
       working_dir: src
       script: |
-        if [[ "Windows_NT" != "$OS" || ! -f ${aws_ec2_yml|""} || -n "${ec2_ssh_failure}" ]]; then
-          exit 0
-        fi
-
-        cmds="mkdir -p ${event_logpath}"
-        cmds="$cmds; wevtutil qe Application /c:10000 /rd:true /f:Text > ${event_logpath}/application.log"
-        cmds="$cmds; wevtutil qe Security    /c:10000 /rd:true /f:Text > ${event_logpath}/security.log"
-        cmds="$cmds; wevtutil qe System      /c:10000 /rd:true /f:Text > ${event_logpath}/system.log"
-
-        ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
         ${activate_virtualenv}
-        $python buildscripts/remote_operations.py          \
-          --verbose                                        \
-          --userHost $USER@${private_ip_address}           \
-          --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries|0}                       \
-          --commands "$cmds"
+        $python buildscripts/powercycle_operations.py gatherRemoteEventLogs
 
   "gather remote mongo coredumps": &gather_remote_mongo_coredumps
     command: shell.exec
@@ -3086,27 +2727,8 @@ functions:
       shell: bash
       working_dir: "src"
       script: |
-        if [[ ! -f ${aws_ec2_yml|""} || -n "${ec2_ssh_failure}" ]]; then
-          exit 0
-        fi
-        ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-        remote_dir=${remote_dir|.}
-        # Find all core files and move to $remote_dir
-        cmds="core_files=\$(/usr/bin/find -H . \( -name '*.core' -o -name '*.mdmp' \) 2> /dev/null)"
-        cmds="$cmds; if [ -z \"\$core_files\" ]; then exit 0; fi"
-        cmds="$cmds; echo Found remote core files \$core_files, moving to \$(pwd)"
-        cmds="$cmds; for core_file in \$core_files"
-        cmds="$cmds; do base_name=\$(echo \$core_file | sed 's/.*\///')"
-        cmds="$cmds;   if [ ! -f \$base_name ]; then mv \$core_file .; fi"
-        cmds="$cmds; done"
         ${activate_virtualenv}
-        $python buildscripts/remote_operations.py          \
-          --verbose                                        \
-          --userHost $USER@${private_ip_address}           \
-          --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries}                         \
-          --commands "$cmds"                               \
-          --commandDir $remote_dir
+        $python buildscripts/powercycle_operations.py gatherRemoteMongoCoredumps
 
   "copy remote mongo coredumps": &copy_remote_mongo_coredumps
     command: shell.exec
@@ -3114,24 +2736,8 @@ functions:
       shell: bash
       working_dir: "src"
       script: |
-        if [[ ! -f ${aws_ec2_yml|""} || -n "${ec2_ssh_failure}" ]]; then
-          exit 0
-        fi
-        ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-        remote_dir=${remote_dir|.}
         ${activate_virtualenv}
-        $python buildscripts/remote_operations.py          \
-          --verbose                                        \
-          --userHost $USER@${private_ip_address}           \
-          --operation "copy_from"                          \
-          --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries}                         \
-          --file "$remote_dir/*.core"                      \
-          --file "$remote_dir/*.mdmp"
-        # Since both type of core files do not exist on the same host, this command
-        # will always return non-zero. As the core file retrieval is optional, we
-        # always exit successfully.
-        exit 0
+        $python buildscripts/powercycle_operations.py copyRemoteMongoCoredumps
 
   "archive remote EC2 artifacts": &archive_remote_ec2_artifacts
     command: s3.put
@@ -3450,6 +3056,7 @@ functions:
         fi
 
         mkdir unittest_binaries || true
+
         # Find all core files
         core_files=$(/usr/bin/find -H . \( -name "dump_*.core" -o -name "*.mdmp" \) 2> /dev/null)
         for core_file in $core_files
@@ -3578,55 +3185,7 @@ functions:
 
         # Call hang analyzer for tasks that are running remote mongo processes
         if [ -n "${private_ip_address}" ]; then
-          core_ext=core
-          if [ "Windows_NT" = "$OS" ]; then
-            core_ext=mdmp
-          fi
-          ssh_connection_options="${ssh_identity} ${ssh_connection_options}"
-          # buildscripts must be installed in ${remote_dir} on the remote host.
-          remote_dir=${remote_dir|.}
-
-          # Copy mongoDB debug symbols to the remote host.
-          debug_files=$(ls *.debug *.dSYM *.pdb 2> /dev/null)
-          for debug_file in $debug_files
-          do
-            file_param="$file_param --file $debug_file"
-          done
-          if [ ! -z "$file_param" ]; then
-            $python buildscripts/remote_operations.py          \
-              --verbose                                        \
-              --userHost $USER@${private_ip_address}           \
-              --operation "copy_to"                            \
-              --sshConnectionOptions "$ssh_connection_options" \
-              --retries ${ssh_retries}                         \
-              $file_param                                      \
-              --remoteDir $remote_dir
-          fi
-
-          # Activate virtualenv on remote host. The virtualenv bin_dir is different for Linux and
-          # Windows.
-          bin_dir=$(find $VIRTUAL_ENV -name activate | sed -e "s,$VIRTUAL_ENV,,;s,activate,,;s,/,,g")
-          cmds=". ${virtualenv_dir|venv}/$bin_dir/activate"
-          # In the 'cmds' variable we pass to remote host, use 'python' instead of '$python' since
-          # we don't want to evaluate the local python variable, but instead pass the python string
-          # so the remote host will use the right python when the virtualenv is sourced.
-          cmds="$cmds; cd ${remote_dir}"
-          cmds="$cmds; PATH=\"/opt/mongodbtoolchain/gdb/bin:\$PATH\" python buildscripts/resmoke.py hang-analyzer $hang_analyzer_option"
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@${private_ip_address}           \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries}                         \
-            --commands "$cmds"
-
-          $python buildscripts/remote_operations.py          \
-            --verbose                                        \
-            --userHost $USER@${private_ip_address}           \
-            --operation "copy_from"                          \
-            --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries}                         \
-            --file "$remote_dir/debugger*.*"                 \
-            --file "$remote_dir/*.$core_ext"
+          $python buildscripts/powercycle_operations.py runHangAnalyzerOnRemoteInstance
         fi
 
   "tar hang analyzer debugger files": &tar_hang_analyzer_debugger_files
@@ -6154,14 +5713,13 @@ tasks:
       resmoke_args: --storageEngine=wiredTiger --excludeWithAnyTags=uses_snapshot_read_concern
       fallback_num_sub_suites: 1
 
-- <<: *task_template
-  name: causally_consistent_hedged_reads_jscore_passthrough
+- name: causally_consistent_hedged_reads_jscore_passthrough_gen
   tags: ["causally_consistent"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
-      resmoke_args: --suites=causally_consistent_hedged_reads_jscore_passthrough --storageEngine=wiredTiger
+      resmoke_args: --storageEngine=wiredTiger
+      fallback_num_sub_suites: 40
 
 - <<: *task_template
   name: sharded_collections_causally_consistent_jscore_txns_passthrough
@@ -7203,7 +6761,7 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
     vars:
-      resmoke_args: --storageEngine=wiredTiger
+      resmoke_args: "--storageEngine=wiredTiger --mongodSetParameters='{logComponentVerbosity: {network: 2, replication: {heartbeats: 2}}}'"
       fallback_num_sub_suites: 5
 
 - name: sslSpecial_gen
@@ -7275,7 +6833,7 @@ tasks:
       fallback_num_sub_suites: 15
 
 - name: causally_consistent_read_concern_snapshot_passthrough_gen
-  tags: ["causally_consistent", "read_write_concern"]
+  tags: ["causally_consistent", "read_write_concern", "durable_history"]
   depends_on:
   - name: jsCore
   commands:
@@ -7286,7 +6844,7 @@ tasks:
       fallback_num_sub_suites: 15
 
 - name: sharded_causally_consistent_read_concern_snapshot_passthrough_gen
-  tags: ["causally_consistent", "read_write_concern"]
+  tags: ["causally_consistent", "read_write_concern", "durable_history"]
   depends_on:
   - name: jsCore
   commands:
@@ -8781,7 +8339,7 @@ buildvariants:
   - rhel62-large
   expansions:
     resmoke_jobs_factor: 0.5  # Avoid starting too many mongod's
-    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --enable-free-mon=off --enable-http-client=off --link-model=dynamic
+    compile_flags: --dbg=on --opt=on -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --enable-free-mon=on --enable-http-client=on --link-model=dynamic
     scons_cache_scope: shared
     scons_cache_mode: all
     test_flags: --excludeWithAnyTags=requires_http_client
@@ -8797,6 +8355,7 @@ buildvariants:
   - name: .change_streams !.secondary_reads
   - name: .misc_js
   - name: disk_wiredtiger
+  - name: free_monitoring
   - name: .integration !.audit
   - name: .jscore .common
   - name: jsCore_txns_large_txns_format
@@ -9947,7 +9506,7 @@ buildvariants:
   - name: initial_sync_fuzzer_gen
   - name: .jscore .common !.decimal !.compat !.sharding
   - name: .jstestfuzz .common !.flow_control  # Flow control jstestfuzz take longer.
-  - name: .read_write_concern .linearize
+  - name: .read_write_concern .linearize !.durable_history
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
   - name: replica_sets_multi_stmt_txn_jscore_passthrough
@@ -10614,6 +10173,7 @@ buildvariants:
   expansions: &enterprise-rhel-62-64-bit-resumable-index-builds-expansions
     test_flags: >-
       --mongodSetParameters="{enableResumableIndexBuilds: true}"
+      --excludeWithAnyTags=resumable_index_build_incompatible
     compile_flags: >-
       -j$(grep -c ^processor /proc/cpuinfo)
       --ssl
@@ -12198,7 +11758,7 @@ buildvariants:
   - name: .aggregation !.unwind !.encrypt
   - name: audit
   - name: .auth !.multiversion
-  - name: .causally_consistent !.wo_snapshot
+  - name: .causally_consistent !.wo_snapshot !.durable_history
   - name: .change_streams !.secondary_reads
   - name: .misc_js
   - name: .concurrency !.ubsan !.no_txns !.debug_only !.kill_terminate
@@ -12215,7 +11775,7 @@ buildvariants:
   - name: .logical_session_cache
   - name: .multi_shard .common
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: .read_write_concern
+  - name: .read_write_concern !.durable_history
   - name: replica_sets
   - name: .replica_sets .common
   - name: .replica_sets .multi_oplog
@@ -12314,7 +11874,7 @@ buildvariants:
     - rhel71-power8-build
   - name: .jscore .common !.decimal
   - name: jsCore_op_query
-  - name: .read_write_concern
+  - name: .read_write_concern !.durable_history
   - name: replica_sets
   - name: .replica_sets .common
   - name: sasl
@@ -12349,7 +11909,7 @@ buildvariants:
     - rhel72-zseries-build
   - name: .jscore .common !.decimal
   - name: jsCore_op_query
-  - name: .read_write_concern
+  - name: .read_write_concern !.durable_history
   - name: replica_sets
   - name: .replica_sets .common
   - name: sasl
@@ -12377,7 +11937,7 @@ buildvariants:
     variant_path_suffix: /opt/mongodbtoolchain/v3/bin
     lang_environment: LANG=C
     san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1" ASAN_OPTIONS=detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1
-    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=address --ssl --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo) --nostrip
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=address --ssl --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under ASAN build.
@@ -12444,7 +12004,7 @@ buildvariants:
     variant_path_suffix: /opt/mongodbtoolchain/v3/bin
     lang_environment: LANG=C
     san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1" ASAN_OPTIONS=detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1
-    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo)
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under ASAN build.
@@ -12471,7 +12031,7 @@ buildvariants:
     variant_path_suffix: /opt/mongodbtoolchain/v3/bin
     lang_environment: LANG=C
     san_options: UBSAN_OPTIONS="print_stacktrace=1"
-    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --sanitize=undefined --ssl --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo) --nostrip
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --sanitize=undefined --ssl --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under UBSAN build.
@@ -12536,7 +12096,7 @@ buildvariants:
     variant_path_suffix: /opt/mongodbtoolchain/v3/bin
     lang_environment: LANG=C
     san_options: UBSAN_OPTIONS="print_stacktrace=1" LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1" ASAN_OPTIONS=detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1
-    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=undefined,address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=undefined,address --ssl -j$(grep -c ^processor /proc/cpuinfo)
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under {A,UB}SAN build.
     hang_analyzer_dump_core: false
     scons_cache_scope: shared
@@ -12565,7 +12125,7 @@ buildvariants:
     variant_path_suffix: /opt/mongodbtoolchain/v3/bin
     lang_environment: LANG=C
     san_options: UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1" ASAN_OPTIONS=detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1
-    compile_flags: LINKFLAGS=-nostdlib++ LIBS=stdc++ --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=undefined,address,fuzzer --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip
+    compile_flags: LINKFLAGS=-nostdlib++ LIBS=stdc++ --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=undefined,address,fuzzer --ssl -j$(grep -c ^processor /proc/cpuinfo)
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under {A,UB}SAN build.
     hang_analyzer_dump_core: false
     scons_cache_scope: shared
@@ -12586,11 +12146,11 @@ buildvariants:
     # We need llvm-symbolizer in the PATH for ASAN for clang-3.7 or later.
     variant_path_suffix: /opt/mongodbtoolchain/v3/bin
     lang_environment: LANG=C
-    san_options: TSAN_OPTIONS="suppressions=etc/tsan.suppressions:halt_on_error=1"
+    san_options: TSAN_OPTIONS="die_after_fork=0:suppressions=etc/tsan.suppressions:halt_on_error=1"
     # TODO: Remove some of the excluded tags when the Biggie storage engine is
     # further along in development: https://jira.mongodb.org/browse/SERVER-48325
     test_flags: --storageEngine=biggie --excludeWithAnyTags=requires_persistence,requires_journaling,uses_transactions,requires_wiredtiger,requires_snapshot_read
-    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=thread --ssl --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo) --nostrip
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=thread --ssl --enable-free-mon=on -j$(grep -c ^processor /proc/cpuinfo)
     # Avoid starting too many mongod's under TSAN build.
     resmoke_jobs_factor: 0.3
     scons_cache_scope: shared

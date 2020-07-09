@@ -1087,8 +1087,8 @@ void InitialSyncer::_fcvFetcherCallback(const StatusWith<Fetcher::QueryResponse>
     auto version = fCVParseSW.getValue();
 
     // Changing the featureCompatibilityVersion during initial sync is unsafe.
-    if (version > ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo44 &&
-        version < ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo46) {
+    if (version > ServerGlobalParams::FeatureCompatibility::kLastLTS &&
+        version < ServerGlobalParams::FeatureCompatibility::kLatest) {
         onCompletionGuard->setResultAndCancelRemainingWork_inlock(
             lock,
             Status(ErrorCodes::IncompatibleServerVersion,
@@ -1151,24 +1151,24 @@ void InitialSyncer::_fcvFetcherCallback(const StatusWith<Fetcher::QueryResponse>
     }
 
     const auto& config = configResult.getValue();
-    _oplogFetcher =
-        _createOplogFetcherFn(_exec,
-                              beginFetchingOpTime,
-                              _syncSource,
-                              config,
-                              std::make_unique<OplogFetcherRestartDecisionInitialSyncer>(
-                                  _sharedData.get(), _opts.oplogFetcherMaxFetcherRestarts),
-                              _rollbackChecker->getBaseRBID(),
-                              false /* requireFresherSyncSource */,
-                              _dataReplicatorExternalState.get(),
-                              [=](OplogFetcher::Documents::const_iterator first,
-                                  OplogFetcher::Documents::const_iterator last,
-                                  const OplogFetcher::DocumentsInfo& info) {
-                                  return _enqueueDocuments(first, last, info);
-                              },
-                              [=](const Status& s) { _oplogFetcherCallback(s, onCompletionGuard); },
-                              initialSyncOplogFetcherBatchSize,
-                              OplogFetcher::StartingPoint::kEnqueueFirstDoc);
+    _oplogFetcher = _createOplogFetcherFn(
+        _exec,
+        beginFetchingOpTime,
+        _syncSource,
+        config,
+        std::make_unique<OplogFetcherRestartDecisionInitialSyncer>(
+            _sharedData.get(), _opts.oplogFetcherMaxFetcherRestarts),
+        _rollbackChecker->getBaseRBID(),
+        false /* requireFresherSyncSource */,
+        _dataReplicatorExternalState.get(),
+        [=](OplogFetcher::Documents::const_iterator first,
+            OplogFetcher::Documents::const_iterator last,
+            const OplogFetcher::DocumentsInfo& info) {
+            return _enqueueDocuments(first, last, info);
+        },
+        [=](const Status& s, int rbid) { _oplogFetcherCallback(s, onCompletionGuard); },
+        initialSyncOplogFetcherBatchSize,
+        OplogFetcher::StartingPoint::kEnqueueFirstDoc);
 
     LOGV2_DEBUG(21178,
                 2,

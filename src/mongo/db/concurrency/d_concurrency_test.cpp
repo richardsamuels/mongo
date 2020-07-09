@@ -1139,12 +1139,12 @@ TEST_F(DConcurrencyTestFixture, DBLockTakesSForAdminS) {
     ASSERT(opCtx->lockState()->getLockMode(resourceIdAdminDB) == MODE_S);
 }
 
-TEST_F(DConcurrencyTestFixture, DBLockTakesXForAdminIX) {
+TEST_F(DConcurrencyTestFixture, DBLockTakesIXForAdminIX) {
     auto opCtx = makeOperationContext();
     getClient()->swapLockState(std::make_unique<LockerImpl>());
     Lock::DBLock dbWrite(opCtx.get(), "admin", MODE_IX);
 
-    ASSERT(opCtx->lockState()->getLockMode(resourceIdAdminDB) == MODE_X);
+    ASSERT(opCtx->lockState()->getLockMode(resourceIdAdminDB) == MODE_IX);
 }
 
 TEST_F(DConcurrencyTestFixture, DBLockTakesXForAdminX) {
@@ -1267,7 +1267,7 @@ TEST_F(DConcurrencyTestFixture, IsCollectionLocked_DB_Locked_IX) {
 TEST_F(DConcurrencyTestFixture, Stress) {
     const int kNumIterations = 5000;
 
-    ProgressMeter progressMeter(kNumIterations * kMaxStressThreads);
+    ProgressMeter progressMeter(kNumIterations);
     std::vector<std::pair<ServiceContext::UniqueClient, ServiceContext::UniqueOperationContext>>
         clients = makeKClientsWithLockers(kMaxStressThreads);
 
@@ -1283,7 +1283,7 @@ TEST_F(DConcurrencyTestFixture, Stress) {
                 ;
 
             for (int i = 0; i < kNumIterations; i++) {
-                const bool sometimes = (std::rand() % 15 == 0);
+                const bool sometimes = (i % 15 == 0);
 
                 if (i % 7 == 0 && threadId == 0 /* Only one upgrader legal */) {
                     Lock::GlobalWrite w(clients[threadId].second.get());
@@ -1375,7 +1375,8 @@ TEST_F(DConcurrencyTestFixture, Stress) {
                     }
                 }
 
-                progressMeter.hit();
+                if (threadId == kMaxStressThreads - 1)
+                    progressMeter.hit();
             }
         });
     }
@@ -1391,7 +1392,7 @@ TEST_F(DConcurrencyTestFixture, Stress) {
 TEST_F(DConcurrencyTestFixture, StressPartitioned) {
     const int kNumIterations = 5000;
 
-    ProgressMeter progressMeter(kNumIterations * kMaxStressThreads);
+    ProgressMeter progressMeter(kNumIterations);
     std::vector<std::pair<ServiceContext::UniqueClient, ServiceContext::UniqueOperationContext>>
         clients = makeKClientsWithLockers(kMaxStressThreads);
 
@@ -1425,7 +1426,8 @@ TEST_F(DConcurrencyTestFixture, StressPartitioned) {
                     Lock::DBLock y(clients[threadId].second.get(), "local", MODE_IX);
                 }
 
-                progressMeter.hit();
+                if (threadId == kMaxStressThreads - 1)
+                    progressMeter.hit();
             }
         });
     }
@@ -2245,6 +2247,8 @@ TEST_F(DConcurrencyTestFixture, RSTLLockGuardResilientToExceptionThrownBeforeWai
 }
 
 TEST_F(DConcurrencyTestFixture, FailPointInLockDoesNotFailUninterruptibleGlobalNonIntentLocks) {
+    auto opCtx = makeOperationContext();
+
     FailPointEnableBlock failWaitingNonPartitionedLocks("failNonIntentLocksIfWaitNeeded");
 
     LockerImpl locker1;
@@ -2252,12 +2256,12 @@ TEST_F(DConcurrencyTestFixture, FailPointInLockDoesNotFailUninterruptibleGlobalN
     LockerImpl locker3;
 
     {
-        locker1.lockGlobal(MODE_IX);
+        locker1.lockGlobal(opCtx.get(), MODE_IX);
 
         // MODE_S attempt.
         stdx::thread t2([&]() {
             UninterruptibleLockGuard noInterrupt(&locker2);
-            locker2.lockGlobal(MODE_S);
+            locker2.lockGlobal(opCtx.get(), MODE_S);
         });
 
         // Wait for the thread to attempt to acquire the global lock in MODE_S.
@@ -2269,12 +2273,12 @@ TEST_F(DConcurrencyTestFixture, FailPointInLockDoesNotFailUninterruptibleGlobalN
     }
 
     {
-        locker1.lockGlobal(MODE_IX);
+        locker1.lockGlobal(opCtx.get(), MODE_IX);
 
         // MODE_X attempt.
         stdx::thread t3([&]() {
             UninterruptibleLockGuard noInterrupt(&locker3);
-            locker3.lockGlobal(MODE_X);
+            locker3.lockGlobal(opCtx.get(), MODE_X);
         });
 
         // Wait for the thread to attempt to acquire the global lock in MODE_X.
@@ -2287,6 +2291,8 @@ TEST_F(DConcurrencyTestFixture, FailPointInLockDoesNotFailUninterruptibleGlobalN
 }
 
 TEST_F(DConcurrencyTestFixture, FailPointInLockDoesNotFailUninterruptibleNonIntentLocks) {
+    auto opCtx = makeOperationContext();
+
     FailPointEnableBlock failWaitingNonPartitionedLocks("failNonIntentLocksIfWaitNeeded");
 
     LockerImpl locker1;
@@ -2296,7 +2302,7 @@ TEST_F(DConcurrencyTestFixture, FailPointInLockDoesNotFailUninterruptibleNonInte
     // Granted MODE_X lock, fail incoming MODE_S and MODE_X.
     const ResourceId resId(RESOURCE_COLLECTION, "TestDB.collection"_sd);
 
-    locker1.lockGlobal(MODE_IX);
+    locker1.lockGlobal(opCtx.get(), MODE_IX);
 
     {
         locker1.lock(resId, MODE_X);
@@ -2304,7 +2310,7 @@ TEST_F(DConcurrencyTestFixture, FailPointInLockDoesNotFailUninterruptibleNonInte
         // MODE_S attempt.
         stdx::thread t2([&]() {
             UninterruptibleLockGuard noInterrupt(&locker2);
-            locker2.lockGlobal(MODE_IS);
+            locker2.lockGlobal(opCtx.get(), MODE_IS);
             locker2.lock(resId, MODE_S);
         });
 
@@ -2323,7 +2329,7 @@ TEST_F(DConcurrencyTestFixture, FailPointInLockDoesNotFailUninterruptibleNonInte
         // MODE_X attempt.
         stdx::thread t3([&]() {
             UninterruptibleLockGuard noInterrupt(&locker3);
-            locker3.lockGlobal(MODE_IX);
+            locker3.lockGlobal(opCtx.get(), MODE_IX);
             locker3.lock(resId, MODE_X);
         });
 

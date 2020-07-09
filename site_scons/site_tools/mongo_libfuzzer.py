@@ -41,7 +41,7 @@ def build_cpp_libfuzzer_test(env, target, source, **kwargs):
     if not myenv.IsSanitizerEnabled("fuzzer"):
         return []
 
-    libdeps = kwargs.get("LIBDEPS", [])
+    libdeps = kwargs.get("LIBDEPS", myenv.get("LIBDEPS", [])).copy()
     kwargs["LIBDEPS"] = libdeps
     kwargs["INSTALL_ALIAS"] = ["tests"]
     sanitizer_option = "-fsanitize=fuzzer"
@@ -63,11 +63,6 @@ def build_cpp_libfuzzer_test(env, target, source, **kwargs):
     result = myenv.Program(target, source, **kwargs)
     myenv.RegisterTest("$LIBFUZZER_TEST_LIST", result[0])
     myenv.Alias("$LIBFUZZER_TEST_ALIAS", result)
-
-    # TODO: remove when hygienic is default
-    hygienic = myenv.GetOption("install-mode") == "hygienic"
-    if not hygienic:
-        myenv.Install("#/build/libfuzzer_tests/", result[0])
 
     return result
 

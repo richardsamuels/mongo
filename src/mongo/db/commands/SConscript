@@ -146,6 +146,7 @@ env.Library(
         'user_management_commands_common.cpp',
         env.Idlc('drop_connections.idl')[0],
         env.Idlc('rwc_defaults_commands.idl')[0],
+        env.Idlc('user_management_commands.idl')[0],
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/read_write_concern_defaults',
@@ -424,6 +425,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/commands',
         '$BUILD_DIR/mongo/db/curop_failpoint_helpers',
         '$BUILD_DIR/mongo/db/dbhelpers',
+        '$BUILD_DIR/mongo/db/exec/sbe_cmd',
         '$BUILD_DIR/mongo/db/exec/stagedebug_cmd',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
         '$BUILD_DIR/mongo/db/pipeline/pipeline',

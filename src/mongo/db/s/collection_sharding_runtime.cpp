@@ -73,11 +73,9 @@ const auto kUnshardedCollection = std::make_shared<UnshardedCollection>();
 
 boost::optional<ChunkVersion> getOperationReceivedVersion(OperationContext* opCtx,
                                                           const NamespaceString& nss) {
-    auto& oss = OperationShardingState::get(opCtx);
-
     // If there is a version attached to the OperationContext, use it as the received version.
-    if (oss.hasShardVersion()) {
-        return oss.getShardVersion(nss);
+    if (OperationShardingState::isOperationVersioned(opCtx)) {
+        return OperationShardingState::get(opCtx).getShardVersion(nss);
     }
 
     // There is no shard version information on the 'opCtx'. This means that the operation
@@ -128,7 +126,7 @@ ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
     // consider all collections as unsharded. Also, return unsharded if no shard version or db
     // version is present on the context.
     if (!ShardingState::get(_serviceContext)->enabled() ||
-        (!oss.hasShardVersion() && !oss.hasDbVersion())) {
+        (!OperationShardingState::isOperationVersioned(opCtx) && !oss.hasDbVersion())) {
         return {kUnshardedCollection};
     }
 
@@ -142,15 +140,6 @@ ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
                       << " is not currently available for description and needs to be recovered "
                       << "from the config server",
         optMetadata);
-
-    return {std::move(optMetadata)};
-}
-
-ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription_DEPRECATED() {
-    auto optMetadata = _getCurrentMetadataIfKnown(boost::none);
-
-    if (!optMetadata)
-        return {kUnshardedCollection};
 
     return {std::move(optMetadata)};
 }
@@ -216,7 +205,7 @@ void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
 void CollectionShardingRuntime::clearFilteringMetadata() {
     stdx::lock_guard lk(_metadataManagerLock);
     if (!isNamespaceAlwaysUnsharded(_nss)) {
-        LOGV2_DEBUG(47985030,
+        LOGV2_DEBUG(4798530,
                     1,
                     "Clearing metadata for collection {namespace}",
                     "Clearing collection metadata",

@@ -25,6 +25,7 @@ error_categories:
     # desirable to maintain a connection with the client. The server will close the connection to
     # get the client to through server selection again.
     - CloseConnectionError
+    - VersionedAPIError
 
 error_codes:
     - {code: 0,name: OK}
@@ -117,7 +118,10 @@ error_codes:
     - {code: 88,name: SplitFailed_OBSOLETE}
     - {code: 89,name: NetworkTimeout,categories: [NetworkError,RetriableError,NetworkTimeoutError]}
     - {code: 90,name: CallbackCanceled,categories: [CancelationError]}
-    - {code: 91,name: ShutdownInProgress,categories: [ShutdownError,CancelationError,RetriableError]}
+    - {code: 91,name: ShutdownInProgress,
+                       extra: ShutdownInProgressQuiesceInfo,
+                       categories: [ShutdownError,CancelationError,RetriableError],
+                       extraIsOptional: True}
     - {code: 92,name: SecondaryAheadOfPrimary}
     - {code: 93,name: InvalidReplicaSetConfig}
     - {code: 94,name: NotYetInitialized}
@@ -146,7 +150,9 @@ error_codes:
     - {code: 118,name: NamespaceNotSharded}
     - {code: 119,name: InvalidSyncSource}
     - {code: 120,name: OplogStartMissing}
-    - {code: 121,name: DocumentValidationFailure} # Only for the document validator on collections.
+    # Error code 121 is only for the document validator on collections.
+    - {code: 121,name: DocumentValidationFailure,
+                extra: 'doc_validation_error::DocumentValidationFailureInfo'}
     - {code: 122,name: OBSOLETE_ReadAfterOptimeTimeout}
     - {code: 123,name: NotAReplicaSet}
     - {code: 124,name: IncompatibleElectionProtocol}
@@ -372,6 +378,20 @@ error_codes:
 
     # The code below is for internal use only and must never be returned in a network response.
     - {code: 316,name: QueryTrialRunCompleted}
+
+    # The code below is for internal use only and must never be returned in a network response.
+    - {code: 317,name: ConnectionPoolExpired,categories: [NetworkError,RetriableError]}
+    
+    - {code: 318,name: ForTestingOptionalErrorExtraInfo,extra: OptionalErrorExtraInfoExample,extraIsOptional: True}
+    - {code: 319,name: MovePrimaryInProgress}
+
+    - {code: 320, name: TenantMigrationConflict}
+    - {code: 321, name: TenantMigrationCommitted}
+    
+    - {code: 322, name: APIVersionError, categories: [VersionedAPIError]}
+    - {code: 323, name: APIStrictError, categories: [VersionedAPIError]}
+    - {code: 324, name: APIDeprecationError, categories: [VersionedAPIError]}
+   
 
     # Error codes 4000-8999 are reserved.
 

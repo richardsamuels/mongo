@@ -36,7 +36,6 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_timestamp_helper.h"
 #include "mongo/db/catalog/uncommitted_collections.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/operation_context.h"
@@ -160,9 +159,8 @@ StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingInd
             for (int i = 0; record && i < internalInsertMaxBatchSize.load(); i++) {
                 RecordId id = record->id;
                 RecordData& data = record->data;
-                // Use the latest BSON validation version. We retain decimal data when repairing
-                // database even if decimal is disabled.
-                auto validStatus = validateBSON(data.data(), data.size(), BSONVersion::kLatest);
+                // We retain decimal data when repairing database even if decimal is disabled.
+                auto validStatus = validateBSON(data.data(), data.size());
                 if (!validStatus.isOK()) {
                     if (repair == RepairData::kNo) {
                         LOGV2_FATAL(31396,

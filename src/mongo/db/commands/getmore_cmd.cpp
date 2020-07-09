@@ -302,15 +302,11 @@ public:
             // If an awaitData getMore is killed during this process due to our max time expiring at
             // an interrupt point, we just continue as normal and return rather than reporting a
             // timeout to the user.
-            Document doc;
+            BSONObj obj;
             PlanExecutor::ExecState state;
             try {
                 while (!FindCommon::enoughForGetMore(request.batchSize.value_or(0), *numResults) &&
-                       PlanExecutor::ADVANCED == (state = exec->getNext(&doc, nullptr))) {
-                    // Note that "needsMerge" implies a find or aggregate operation, which should
-                    // always have a non-NULL 'expCtx' value.
-                    BSONObj obj = cursor->needsMerge() ? doc.toBsonWithMetaData() : doc.toBson();
-
+                       PlanExecutor::ADVANCED == (state = exec->getNext(&obj, nullptr))) {
                     // If adding this object will cause us to exceed the message size limit, then we
                     // stash it for later.
                     if (!FindCommon::haveSpaceForNext(obj, *numResults, nextBatch->bytesUsed())) {
@@ -378,33 +374,6 @@ public:
             boost::optional<AutoGetCollectionForRead> readLock;
             boost::optional<AutoStatsTracker> statsTracker;
 
-            {
-                // We call RecoveryUnit::setTimestampReadSource() before acquiring a lock on the
-                // collection via AutoGetCollectionForRead in order to ensure the comparison to the
-                // collection's minimum visible snapshot is accurate.
-                PlanExecutor* exec = cursorPin->getExecutor();
-                const auto* cq = exec->getCanonicalQuery();
-
-                if (auto clusterTime =
-                        (cq ? cq->getQueryRequest().getReadAtClusterTime() : boost::none)) {
-                    // We don't compare 'clusterTime' to the last applied opTime or to the
-                    // all-committed timestamp because the testing infrastructure won't use the
-                    // $_internalReadAtClusterTime option in any test suite where rollback is
-                    // expected to occur.
-
-                    // The $_internalReadAtClusterTime option causes any storage-layer cursors
-                    // created during plan execution to read from a consistent snapshot of data at
-                    // the supplied clusterTime, even across yields.
-                    opCtx->recoveryUnit()->setTimestampReadSource(
-                        RecoveryUnit::ReadSource::kProvided, clusterTime);
-
-                    // The $_internalReadAtClusterTime option also causes any storage-layer cursors
-                    // created during plan execution to block on prepared transactions. Since the
-                    // getMore command ignores prepare conflicts by default, change the behavior.
-                    opCtx->recoveryUnit()->setPrepareConflictBehavior(
-                        PrepareConflictBehavior::kEnforce);
-                }
-            }
             if (cursorPin->getExecutor()->lockPolicy() ==
                 PlanExecutor::LockPolicy::kLocksInternally) {
                 if (!_request.nss.isCollectionlessCursorNamespace()) {
